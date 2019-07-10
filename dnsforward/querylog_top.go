@@ -29,31 +29,29 @@ func (h *hourTop) init() {
 }
 
 type dayTop struct {
+	limit     int
 	hours     []*hourTop
 	hoursLock sync.RWMutex // writelock this lock ONLY WHEN rotating or intializing hours!
-
-	loaded     bool
-	loadedLock sync.Mutex
 }
 
-func (d *dayTop) init() {
-	d.hoursWriteLock()
-	for i := 0; i < 24; i++ {
+func (d *dayTop) init(limit int) {
+	d.limit = limit
+	d.hours = []*hourTop{}
+	for i := 0; i < limit; i++ {
 		hour := hourTop{}
 		hour.init()
 		d.hours = append(d.hours, &hour)
 	}
-	d.hoursWriteUnlock()
 }
 
 func (d *dayTop) rotateHourlyTop() {
 	log.Printf("Rotating hourly top")
 	hour := &hourTop{}
 	hour.init()
-	d.hoursWriteLock()
+	d.hoursLock.Lock()
 	d.hours = append([]*hourTop{hour}, d.hours...)
-	d.hours = d.hours[:24]
-	d.hoursWriteUnlock()
+	d.hours = d.hours[:d.limit]
+	d.hoursLock.Unlock()
 }
 
 func (d *dayTop) periodicHourlyTopRotate() {
@@ -146,8 +144,8 @@ func (h *hourTop) lockedGetClients(key string) (int, error) {
 func (d *dayTop) addEntry(entry *logEntry, q *dns.Msg, now time.Time) error {
 	// figure out which hour bucket it belongs to
 	hour := int(now.Sub(entry.Time).Hours())
-	if hour >= 24 {
-		log.Printf("t %v is >24 hours ago, ignoring", entry.Time)
+	if hour >= d.limit {
+		log.Printf("t %v is very old, ignoring", entry.Time)
 		return nil
 	}
 
@@ -164,8 +162,8 @@ func (d *dayTop) addEntry(entry *logEntry, q *dns.Msg, now time.Time) error {
 	}
 
 	// get value, if not set, crate one
-	d.hoursReadLock()
-	defer d.hoursReadUnlock()
+	d.hoursLock.RLock()
+	defer d.hoursLock.RUnlock()
 	err := d.hours[hour].incrementDomains(hostname)
 	if err != nil {
 		log.Printf("Failed to increment value: %s", err)
@@ -193,59 +191,55 @@ func (d *dayTop) addEntry(entry *logEntry, q *dns.Msg, now time.Time) error {
 
 func (l *queryLog) fillStatsFromQueryLog(s *stats) error {
 	now := time.Now()
-	l.runningTop.loadedWriteLock()
-	defer l.runningTop.loadedWriteUnlock()
-	if l.runningTop.loaded {
+
+	r := l.OpenReader()
+	if r == nil {
 		return nil
 	}
-	onEntry := func(entry *logEntry) error {
+
+	r.BeginRead(0, 0)
+
+	for {
+		entry := r.Next()
+		if entry == nil {
+			break
+		}
+
+		if uint(now.Sub(entry.Time).Hours()) > l.timeLimit {
+			continue
+		}
+
 		if len(entry.Question) == 0 {
-			log.Printf("entry question is absent, skipping")
-			return nil
+			log.Debug("entry question is absent, skipping")
+			continue
 		}
 
 		if entry.Time.After(now) {
-			log.Printf("t %v vs %v is in the future, ignoring", entry.Time, now)
-			return nil
+			log.Debug("t %v vs %v is in the future, ignoring", entry.Time, now)
+			continue
 		}
 
 		q := new(dns.Msg)
 		if err := q.Unpack(entry.Question); err != nil {
-			log.Printf("failed to unpack dns message question: %s", err)
-			return err
+			log.Debug("failed to unpack dns message question: %s", err)
+			continue
 		}
 
 		if len(q.Question) != 1 {
-			log.Printf("malformed dns message, has no questions, skipping")
-			return nil
+			log.Debug("malformed dns message, has no questions, skipping")
+			continue
 		}
 
 		err := l.runningTop.addEntry(entry, q, now)
 		if err != nil {
-			log.Printf("Failed to add entry to running top: %s", err)
-			return err
+			log.Debug("Failed to add entry to running top: %s", err)
+			continue
 		}
-
-		l.queryLogLock.Lock()
-		l.queryLogCache = append(l.queryLogCache, entry)
-		if len(l.queryLogCache) > queryLogSize {
-			toremove := len(l.queryLogCache) - queryLogSize
-			l.queryLogCache = l.queryLogCache[toremove:]
-		}
-		l.queryLogLock.Unlock()
 
 		s.incrementCounters(entry)
-		return nil
 	}
 
-	needMore := func() bool { return true }
-	err := l.genericLoader(onEntry, needMore, queryLogTimeLimit)
-	if err != nil {
-		log.Printf("Failed to load entries from querylog: %s", err)
-		return err
-	}
-
-	l.runningTop.loaded = true
+	r.Close()
 	return nil
 }
 
@@ -257,7 +251,8 @@ type StatsTop struct {
 }
 
 // getStatsTop returns the current top stats
-func (d *dayTop) getStatsTop() *StatsTop {
+// hourOffset: Get data from [NOW-hourOffset..NOW]
+func (d *dayTop) getStatsTop(hourOffset int) *StatsTop {
 	s := &StatsTop{
 		Domains: map[string]int{},
 		Blocked: map[string]int{},
@@ -279,25 +274,21 @@ func (d *dayTop) getStatsTop() *StatsTop {
 		}
 	}
 
-	d.hoursReadLock()
-	for hour := 0; hour < 24; hour++ {
+	d.hoursLock.RLock()
+	if hourOffset > len(d.hours) {
+		hourOffset = len(d.hours)
+	}
+	for hour := 0; hour < hourOffset; hour++ {
 		d.hours[hour].RLock()
 		do(d.hours[hour].domains.Keys(), d.hours[hour].lockedGetDomains, s.Domains)
 		do(d.hours[hour].blocked.Keys(), d.hours[hour].lockedGetBlocked, s.Blocked)
 		do(d.hours[hour].clients.Keys(), d.hours[hour].lockedGetClients, s.Clients)
 		d.hours[hour].RUnlock()
 	}
-	d.hoursReadUnlock()
+	d.hoursLock.RUnlock()
 
 	return s
 }
-
-func (d *dayTop) hoursWriteLock()    { tracelock(); d.hoursLock.Lock() }
-func (d *dayTop) hoursWriteUnlock()  { tracelock(); d.hoursLock.Unlock() }
-func (d *dayTop) hoursReadLock()     { tracelock(); d.hoursLock.RLock() }
-func (d *dayTop) hoursReadUnlock()   { tracelock(); d.hoursLock.RUnlock() }
-func (d *dayTop) loadedWriteLock()   { tracelock(); d.loadedLock.Lock() }
-func (d *dayTop) loadedWriteUnlock() { tracelock(); d.loadedLock.Unlock() }
 
 func (h *hourTop) Lock()    { tracelock(); h.mutex.Lock() }
 func (h *hourTop) RLock()   { tracelock(); h.mutex.RLock() }

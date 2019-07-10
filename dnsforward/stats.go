@@ -225,10 +225,10 @@ func (s *stats) incrementCounters(entry *logEntry) {
 	s.observeWithTime(s.elapsedTime, entry.Elapsed.Seconds(), entry.Time)
 }
 
-// getAggregatedStats returns aggregated stats data for the 24 hours
-func (s *stats) getAggregatedStats() map[string]interface{} {
-	const numHours = 24
-	historical := s.generateMapFromStats(&s.perHour, 0, numHours)
+// getAggregatedStats returns aggregated stats data
+// hourOffset: Get data from [NOW-hourOffset..NOW]
+func (s *stats) getAggregatedStats(hourOffset int) map[string]interface{} {
+	historical := s.generateMapFromStats(&s.perHour, 0, hourOffset)
 	// sum them up
 	summed := map[string]interface{}{}
 	for key, values := range historical {
@@ -245,12 +245,11 @@ func (s *stats) getAggregatedStats() map[string]interface{} {
 	// don't forget to divide by number of elements in returned slice
 	if val, ok := summed["avg_processing_time"]; ok {
 		if flval, flok := val.(float64); flok {
-			flval /= numHours
+			flval /= float64(hourOffset)
 			summed["avg_processing_time"] = flval
 		}
 	}
 
-	summed["stats_period"] = "24 hours"
 	return summed
 }
 

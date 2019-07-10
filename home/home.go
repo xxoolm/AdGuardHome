@@ -401,6 +401,7 @@ func stopHTTPServer() {
 
 // This function is called before application exits
 func cleanupAlways() {
+	config.dnsServer.Close()
 	if len(config.pidFileName) != 0 {
 		os.Remove(config.pidFileName)
 	}

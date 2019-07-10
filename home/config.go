@@ -166,6 +166,7 @@ var config = configuration{
 			BlockingMode:       "nxdomain", // mode how to answer filtered requests
 			BlockedResponseTTL: 10,         // in seconds
 			QueryLogEnabled:    true,
+			QueryLogInterval:   1,
 			Ratelimit:          20,
 			RefuseAny:          true,
 			BootstrapDNS:       defaultBootstrap,
@@ -257,6 +258,10 @@ func parseConfig() error {
 	if err != nil {
 		log.Error("Couldn't parse config file: %s", err)
 		return err
+	}
+
+	if !checkQueryLogInterval(config.DNS.QueryLogInterval) {
+		config.DNS.QueryLogInterval = 1
 	}
 
 	for _, cy := range config.Clients {

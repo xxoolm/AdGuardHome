@@ -46,9 +46,7 @@ func TestServer(t *testing.T) {
 	assertGoogleAResponse(t, reply)
 
 	// check query log and stats
-	log := s.GetQueryLog()
-	assert.Equal(t, 1, len(log), "Log size")
-	stats := s.GetStatsTop()
+	stats := s.GetStatsTop(24)
 	assert.Equal(t, 1, len(stats.Domains), "Top domains length")
 	assert.Equal(t, 0, len(stats.Blocked), "Top blocked length")
 	assert.Equal(t, 1, len(stats.Clients), "Top clients length")
@@ -64,9 +62,7 @@ func TestServer(t *testing.T) {
 	assertGoogleAResponse(t, reply)
 
 	// check query log and stats again
-	log = s.GetQueryLog()
-	assert.Equal(t, 2, len(log), "Log size")
-	stats = s.GetStatsTop()
+	stats = s.GetStatsTop(24)
 	// Length did not change as we queried the same domain
 	assert.Equal(t, 1, len(stats.Domains), "Top domains length")
 	assert.Equal(t, 0, len(stats.Blocked), "Top blocked length")
@@ -163,9 +159,9 @@ func TestSafeSearch(t *testing.T) {
 	}
 
 	// Check aggregated stats
-	assert.Equal(t, s.GetAggregatedStats()["replaced_safesearch"], float64(len(yandexDomains)))
-	assert.Equal(t, s.GetAggregatedStats()["blocked_filtering"], float64(len(yandexDomains)))
-	assert.Equal(t, s.GetAggregatedStats()["dns_queries"], float64(len(yandexDomains)))
+	assert.Equal(t, s.GetAggregatedStats(24)["replaced_safesearch"], float64(len(yandexDomains)))
+	assert.Equal(t, s.GetAggregatedStats(24)["blocked_filtering"], float64(len(yandexDomains)))
+	assert.Equal(t, s.GetAggregatedStats(24)["dns_queries"], float64(len(yandexDomains)))
 
 	// Let's lookup for google safesearch ip
 	ips, err := net.LookupIP("forcesafesearch.google.com")
@@ -188,25 +184,25 @@ func TestSafeSearch(t *testing.T) {
 	}
 
 	// Check aggregated stats
-	assert.Equal(t, s.GetAggregatedStats()["replaced_safesearch"], float64(len(yandexDomains)+len(googleDomains)))
-	assert.Equal(t, s.GetAggregatedStats()["blocked_filtering"], float64(len(yandexDomains)+len(googleDomains)))
-	assert.Equal(t, s.GetAggregatedStats()["dns_queries"], float64(len(yandexDomains)+len(googleDomains)))
+	assert.Equal(t, s.GetAggregatedStats(24)["replaced_safesearch"], float64(len(yandexDomains)+len(googleDomains)))
+	assert.Equal(t, s.GetAggregatedStats(24)["blocked_filtering"], float64(len(yandexDomains)+len(googleDomains)))
+	assert.Equal(t, s.GetAggregatedStats(24)["dns_queries"], float64(len(yandexDomains)+len(googleDomains)))
 
 	// Do one more exchange
 	exchangeAndAssertResponse(t, &client, addr, "google-public-dns-a.google.com.", "8.8.8.8")
 
 	// Check aggregated stats
-	assert.Equal(t, s.GetAggregatedStats()["replaced_safesearch"], float64(len(yandexDomains)+len(googleDomains)))
-	assert.Equal(t, s.GetAggregatedStats()["blocked_filtering"], float64(len(yandexDomains)+len(googleDomains)))
-	assert.Equal(t, s.GetAggregatedStats()["dns_queries"], float64(len(yandexDomains)+len(googleDomains)+1))
+	assert.Equal(t, s.GetAggregatedStats(24)["replaced_safesearch"], float64(len(yandexDomains)+len(googleDomains)))
+	assert.Equal(t, s.GetAggregatedStats(24)["blocked_filtering"], float64(len(yandexDomains)+len(googleDomains)))
+	assert.Equal(t, s.GetAggregatedStats(24)["dns_queries"], float64(len(yandexDomains)+len(googleDomains)+1))
 
 	// Count of blocked domains	(there is `yandex.com` duplicate in yandexDomains array)
 	blockedCount := len(yandexDomains) - 1 + len(googleDomains)
-	assert.Equal(t, len(s.GetStatsTop().Blocked), blockedCount)
+	assert.Equal(t, len(s.GetStatsTop(24).Blocked), blockedCount)
 
 	// Count of domains (blocked domains + `google-public-dns-a.google.com`)
 	domainsCount := blockedCount + 1
-	assert.Equal(t, len(s.GetStatsTop().Domains), domainsCount)
+	assert.Equal(t, len(s.GetStatsTop(24).Domains), domainsCount)
 
 	err = s.Stop()
 	if err != nil {
@@ -237,9 +233,7 @@ func TestInvalidRequest(t *testing.T) {
 
 	// check query log and stats
 	// invalid requests aren't written to the query log
-	log := s.GetQueryLog()
-	assert.Equal(t, 0, len(log), "Log size")
-	stats := s.GetStatsTop()
+	stats := s.GetStatsTop(24)
 	assert.Equal(t, 0, len(stats.Domains), "Top domains length")
 	assert.Equal(t, 0, len(stats.Blocked), "Top blocked length")
 	assert.Equal(t, 0, len(stats.Clients), "Top clients length")
@@ -278,9 +272,7 @@ func TestBlockedRequest(t *testing.T) {
 	}
 
 	// check query log and stats
-	log := s.GetQueryLog()
-	assert.Equal(t, 1, len(log), "Log size")
-	stats := s.GetStatsTop()
+	stats := s.GetStatsTop(24)
 	assert.Equal(t, 1, len(stats.Domains), "Top domains length")
 	assert.Equal(t, 1, len(stats.Blocked), "Top blocked length")
 	assert.Equal(t, 1, len(stats.Clients), "Top clients length")
@@ -327,9 +319,7 @@ func TestNullBlockedRequest(t *testing.T) {
 	}
 
 	// check query log and stats
-	log := s.GetQueryLog()
-	assert.Equal(t, 1, len(log), "Log size")
-	stats := s.GetStatsTop()
+	stats := s.GetStatsTop(24)
 	assert.Equal(t, 1, len(stats.Domains), "Top domains length")
 	assert.Equal(t, 1, len(stats.Blocked), "Top blocked length")
 	assert.Equal(t, 1, len(stats.Clients), "Top clients length")
@@ -375,9 +365,7 @@ func TestBlockedByHosts(t *testing.T) {
 	}
 
 	// check query log and stats
-	log := s.GetQueryLog()
-	assert.Equal(t, 1, len(log), "Log size")
-	stats := s.GetStatsTop()
+	stats := s.GetStatsTop(24)
 	assert.Equal(t, 1, len(stats.Domains), "Top domains length")
 	assert.Equal(t, 1, len(stats.Blocked), "Top blocked length")
 	assert.Equal(t, 1, len(stats.Clients), "Top clients length")
@@ -434,9 +422,7 @@ func TestBlockedBySafeBrowsing(t *testing.T) {
 	}
 
 	// check query log and stats
-	log := s.GetQueryLog()
-	assert.Equal(t, 1, len(log), "Log size")
-	stats := s.GetStatsTop()
+	stats := s.GetStatsTop(24)
 	assert.Equal(t, 1, len(stats.Domains), "Top domains length")
 	assert.Equal(t, 1, len(stats.Blocked), "Top blocked length")
 	assert.Equal(t, 1, len(stats.Clients), "Top clients length")
@@ -448,7 +434,8 @@ func TestBlockedBySafeBrowsing(t *testing.T) {
 }
 
 func createTestServer(t *testing.T) *Server {
-	s := NewServer(createDataDir(t))
+	s := NewServer(createDataDir(t), true)
+	s.conf.QueryLogInterval = 1
 	s.conf.UDPListenAddr = &net.UDPAddr{Port: 0}
 	s.conf.TCPListenAddr = &net.TCPAddr{Port: 0}
 
@@ -694,4 +681,59 @@ func TestIsBlockedIPBlockedDomain(t *testing.T) {
 	if s.isBlockedDomain("host3") {
 		t.Fatalf("isBlockedDomain")
 	}
+}
+
+func checkEntries(data []*logEntry) bool {
+	right := len(data) - 1
+	return data[0].Elapsed == time.Duration(0) &&
+		data[right].Elapsed == time.Duration(right)
+}
+
+func TestQueryLog(t *testing.T) {
+	var data []*logEntry
+	var total int
+
+	_ = os.Remove(queryLogFileName)
+	ql := newQueryLog(".", false)
+
+	data, total = ql.getQueryLogData(0)
+	assert.True(t, total == 0)
+
+	n := 0
+	for ; n != logBufferCap; n++ {
+		a := &net.UDPAddr{IP: net.IP{1, 2, 3, 4}, Port: 123}
+		ql.logRequest(&dns.Msg{}, &dns.Msg{}, &dnsfilter.Result{}, time.Duration(n), a, "up1")
+	}
+
+	// wait until data is written to a file
+	time.Sleep(3 * time.Second)
+
+	for ; n != logBufferCap+3; n++ {
+		a := &net.UDPAddr{IP: net.IP{1, 2, 3, 4}, Port: 123}
+		ql.logRequest(&dns.Msg{}, &dns.Msg{}, &dnsfilter.Result{}, time.Duration(n), a, "up1")
+	}
+
+	data, total = ql.getQueryLogData(0)
+	assert.True(t, total == n && len(data) == n)
+	assert.True(t, checkEntries(data))
+
+	data, total = ql.getQueryLogData(-1)
+	assert.True(t, total == n && len(data) == n)
+	assert.True(t, checkEntries(data))
+
+	// get data (skip the last 1)
+	data, total = ql.getQueryLogData(1)
+	assert.True(t, len(data) == n-1)
+	assert.True(t, checkEntries(data))
+
+	// get data (skip the last 4)
+	data, total = ql.getQueryLogData(4)
+	assert.True(t, len(data) == n-4)
+	assert.True(t, checkEntries(data))
+
+	// get data with offset larger than total number
+	data, total = ql.getQueryLogData(n)
+	assert.True(t, len(data) == 0)
+
+	_ = os.Remove(queryLogFileName)
 }

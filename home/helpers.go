@@ -60,9 +60,9 @@ func (h *httpHandler) ServeHTTP(w http.ResponseWriter, r *http.Request) {
 	h.handler(w, r)
 }
 
-func ensureGETHandler(handler func(http.ResponseWriter, *http.Request)) http.Handler {
+func ensurePOSTHandler(handler func(http.ResponseWriter, *http.Request)) http.Handler {
 	h := httpHandler{}
-	h.handler = ensure("GET", handler)
+	h.handler = ensure("POST", handler)
 	return &h
 }
 

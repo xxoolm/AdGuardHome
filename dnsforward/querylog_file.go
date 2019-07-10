@@ -2,15 +2,14 @@ package dnsforward
 
 import (
 	"bytes"
-	"compress/gzip"
-	"encoding/json"
-	"fmt"
-	"os"
+	"encoding/binary"
+	"encoding/gob"
+	"math"
 	"sync"
 	"time"
 
 	"github.com/AdguardTeam/golibs/log"
-	"github.com/go-test/deep"
+	bolt "github.com/etcd-io/bbolt"
 )
 
 var (
@@ -43,234 +42,258 @@ func (l *queryLog) flushLogBuffer(fullFlush bool) error {
 	return nil
 }
 
+// itob returns an 8-byte big endian representation of v.
+func itob(v int) []byte {
+	b := make([]byte, 8)
+	binary.BigEndian.PutUint64(b, uint64(v))
+	return b
+}
+
 // flushToFile saves the specified log entries to the query log file
 func (l *queryLog) flushToFile(buffer []*logEntry) error {
 	if len(buffer) == 0 {
 		log.Debug("querylog: there's nothing to write to a file")
 		return nil
 	}
+	if l.db == nil {
+		return nil
+	}
 	start := time.Now()
 
-	var b bytes.Buffer
-	e := json.NewEncoder(&b)
+	tx, err := l.db.Begin(true)
+	if err != nil {
+		log.Error("db.Begin: %s", err)
+		return nil
+	}
+	defer tx.Rollback()
+
+	bkt, err := tx.CreateBucketIfNotExists([]byte("querylog"))
+	if err != nil {
+		log.Error("tx.CreateBucketIfNotExists: %s", err)
+		return nil
+	}
+
+	total := 0
 	for _, entry := range buffer {
-		err := e.Encode(entry)
+		var buf bytes.Buffer
+		enc := gob.NewEncoder(&buf)
+
+		err := enc.Encode(entry)
 		if err != nil {
 			log.Error("Failed to marshal entry: %s", err)
 			return err
 		}
-	}
 
-	elapsed := time.Since(start)
-	log.Debug("%d elements serialized via json in %v: %d kB, %v/entry, %v/entry", len(buffer), elapsed, b.Len()/1024, float64(b.Len())/float64(len(buffer)), elapsed/time.Duration(len(buffer)))
-
-	err := checkBuffer(buffer, b)
-	if err != nil {
-		log.Error("failed to check buffer: %s", err)
-		return err
-	}
-
-	var zb bytes.Buffer
-	filename := l.logFile
-
-	// gzip enabled?
-	if enableGzip {
-		filename += ".gz"
-
-		zw := gzip.NewWriter(&zb)
-		zw.Name = l.logFile
-		zw.ModTime = time.Now()
-
-		_, err = zw.Write(b.Bytes())
+		id, _ := bkt.NextSequence()
+		err = bkt.Put(itob(int(id)), buf.Bytes())
 		if err != nil {
-			log.Error("Couldn't compress to gzip: %s", err)
-			zw.Close()
-			return err
+			log.Error("bkt.Put: %s", err)
+			return nil
 		}
+		// log.Tracef("Put: %d = %v", id, buf.Bytes())
 
-		if err = zw.Close(); err != nil {
-			log.Error("Couldn't close gzip writer: %s", err)
-			return err
-		}
-	} else {
-		zb = b
+		total += buf.Len()
 	}
 
-	fileWriteLock.Lock()
-	defer fileWriteLock.Unlock()
-	f, err := os.OpenFile(filename, os.O_WRONLY|os.O_CREATE|os.O_APPEND, 0644)
+	err = tx.Commit()
 	if err != nil {
-		log.Error("failed to create file \"%s\": %s", filename, err)
-		return err
-	}
-	defer f.Close()
-
-	n, err := f.Write(zb.Bytes())
-	if err != nil {
-		log.Error("Couldn't write to file: %s", err)
-		return err
-	}
-
-	log.Debug("ok \"%s\": %v bytes written", filename, n)
-
-	return nil
-}
-
-func checkBuffer(buffer []*logEntry, b bytes.Buffer) error {
-	l := len(buffer)
-	d := json.NewDecoder(&b)
-
-	i := 0
-	for d.More() {
-		entry := &logEntry{}
-		err := d.Decode(entry)
-		if err != nil {
-			log.Error("Failed to decode: %s", err)
-			return err
-		}
-		if diff := deep.Equal(entry, buffer[i]); diff != nil {
-			log.Error("decoded buffer differs: %s", diff)
-			return fmt.Errorf("decoded buffer differs: %s", diff)
-		}
-		i++
-	}
-	if i != l {
-		err := fmt.Errorf("check fail: %d vs %d entries", l, i)
-		log.Error("%v", err)
-		return err
-	}
-	log.Debug("check ok: %d entries", i)
-
-	return nil
-}
-
-func (l *queryLog) rotateQueryLog() error {
-	from := l.logFile
-	to := l.logFile + ".1"
-
-	if enableGzip {
-		from = l.logFile + ".gz"
-		to = l.logFile + ".gz.1"
-	}
-
-	if _, err := os.Stat(from); os.IsNotExist(err) {
-		// do nothing, file doesn't exist
+		log.Error("tx.Commit: %s", err)
 		return nil
 	}
 
-	err := os.Rename(from, to)
+	elapsed := time.Since(start)
+	log.Debug("querylog: %d elements serialized in %v: %d kB, %v/entry, %v/entry", len(buffer), elapsed, total/1024, float64(total)/float64(len(buffer)), elapsed/time.Duration(len(buffer)))
+	return nil
+}
+
+// Remove old items from query log
+func (l *queryLog) rotateQueryLog() error {
+	now := time.Now()
+	validFrom := now.Unix() - int64(l.timeLimit*60*60)
+
+	log.Debug("querylog: removing old items")
+
+	tx, err := l.db.Begin(true)
 	if err != nil {
-		log.Error("Failed to rename querylog: %s", err)
-		return err
+		log.Error("db.Begin: %s", err)
+		return nil
+	}
+	defer tx.Rollback()
+
+	bkt := tx.Bucket([]byte("querylog"))
+	if bkt == nil {
+		return nil
 	}
 
-	log.Debug("Rotated from %s to %s successfully", from, to)
+	cur := bkt.Cursor()
 
+	n := 0
+	for k, v := cur.First(); k != nil; k, v = cur.Next() {
+
+		var entry logEntry
+		var buf bytes.Buffer
+		buf.Write(v)
+		dec := gob.NewDecoder(&buf)
+		err := dec.Decode(&entry)
+		if err != nil {
+			log.Error("Failed to decode: %s", err)
+			continue
+		}
+
+		if entry.Time.Unix() >= validFrom {
+			break
+		}
+
+		// log.Tracef("Removed: %v", k)
+
+		cur.Delete()
+		n++
+	}
+
+	err = tx.Commit()
+	if err != nil {
+		log.Error("tx.Commit: %s", err)
+		return nil
+	}
+
+	log.Debug("querylog: removed %d old items", n)
 	return nil
 }
 
 func (l *queryLog) periodicQueryLogRotate() {
-	for range time.Tick(queryLogRotationPeriod) {
+	for {
 		err := l.rotateQueryLog()
 		if err != nil {
 			log.Error("Failed to rotate querylog: %s", err)
 			// do nothing, continue rotating
 		}
+		time.Sleep(queryLogRotationPeriod)
 	}
 }
 
-func (l *queryLog) genericLoader(onEntry func(entry *logEntry) error, needMore func() bool, timeWindow time.Duration) error {
-	now := time.Now()
-	// read from querylog files, try newest file first
-	var files []string
+// Reader is the DB reader context
+type Reader struct {
+	tx  *bolt.Tx
+	bkt *bolt.Bucket
+	cur *bolt.Cursor
 
-	if enableGzip {
-		files = []string{
-			l.logFile + ".gz",
-			l.logFile + ".gz.1",
+	now time.Time
+
+	key []byte
+	val []byte
+
+	start uint // ID of the first element to return
+	count uint // returned elements counter
+	limit uint // maximum number of elements
+}
+
+// OpenReader locks the file and returns reader object or nil on error
+func (l *queryLog) OpenReader() *Reader {
+	r := Reader{}
+	r.now = time.Now()
+
+	var err error
+	r.tx, err = l.db.Begin(false)
+	if err != nil {
+		log.Error("db.Begin: %s", err)
+		return nil
+	}
+	return &r
+}
+
+// BeginRead starts reading
+// off: Number of items to skip from the end
+// num: Read the last N elements;  0: read all items
+func (r *Reader) BeginRead(off, num int) {
+	r.bkt = r.tx.Bucket([]byte("querylog"))
+	if r.bkt == nil {
+		return
+	}
+	r.cur = r.bkt.Cursor()
+
+	// ...[.......].......
+	//     ^       ^     ^
+	//     START   END   SEQ
+
+	if num == 0 {
+		r.key, r.val = r.cur.First()
+		if off != 0 {
+			log.Debug("querylog: not supported")
+			return
 		}
+		r.limit = math.MaxUint64
+
 	} else {
-		files = []string{
-			l.logFile,
-			l.logFile + ".1",
+
+		start := int(r.bkt.Sequence()+1) - (num + off)
+		if start <= 0 {
+			start = 1
 		}
+
+		r.limit = uint(num)
+		r.key, r.val = r.cur.Seek(itob(start))
+		if r.key != nil {
+			id := uint(binary.BigEndian.Uint64(r.key))
+			r.limit = uint(r.bkt.Sequence()+1) - uint(off) - uint(id)
+		}
+		r.start = uint(start)
 	}
+}
 
-	// read from all files
-	for _, file := range files {
-		if !needMore() {
-			break
-		}
-		if _, err := os.Stat(file); os.IsNotExist(err) {
-			// do nothing, file doesn't exist
-			continue
+// Close closes the reader
+func (r *Reader) Close() {
+	r.tx.Rollback()
+
+	elapsed := time.Since(r.now)
+	var perunit time.Duration
+	if r.count > 0 {
+		perunit = elapsed / time.Duration(r.count)
+	}
+	seq := 0
+	if r.bkt != nil {
+		r.bkt.Sequence()
+	}
+	log.Debug("querylog: read %d entries @%d seq=%d in %v, %v/entry",
+		r.count, r.start, seq, elapsed, perunit)
+}
+
+// Next returns the next entry or nil if reading is finished
+func (r *Reader) Next() *logEntry {
+	for {
+		if r.key == nil || r.count == r.limit {
+			return nil
 		}
 
-		f, err := os.Open(file)
+		log.Tracef("Read: %v size:%d", r.key, len(r.val))
+
+		var entry logEntry
+		var buf bytes.Buffer
+		buf.Write(r.val)
+		dec := gob.NewDecoder(&buf)
+		err := dec.Decode(&entry)
 		if err != nil {
-			log.Error("Failed to open file \"%s\": %s", file, err)
-			// try next file
+			log.Debug("dec.Decode: %s", err)
+			r.key, r.val = r.cur.Next()
 			continue
 		}
-		defer f.Close()
 
-		var d *json.Decoder
-
-		if enableGzip {
-			zr, err := gzip.NewReader(f)
-			if err != nil {
-				log.Error("Failed to create gzip reader: %s", err)
-				continue
-			}
-			defer zr.Close()
-			d = json.NewDecoder(zr)
-		} else {
-			d = json.NewDecoder(f)
-		}
-
-		i := 0
-		over := 0
-		max := 10000 * time.Second
-		var sum time.Duration
-		// entries on file are in oldest->newest order
-		// we want maxLen newest
-		for d.More() {
-			if !needMore() {
-				break
-			}
-			var entry logEntry
-			err := d.Decode(&entry)
-			if err != nil {
-				log.Error("Failed to decode: %s", err)
-				// next entry can be fine, try more
-				continue
-			}
-
-			if now.Sub(entry.Time) > timeWindow {
-				// log.Tracef("skipping entry") // debug logging
-				continue
-			}
-
-			if entry.Elapsed > max {
-				over++
-			} else {
-				sum += entry.Elapsed
-			}
-
-			i++
-			err = onEntry(&entry)
-			if err != nil {
-				return err
-			}
-		}
-		elapsed := time.Since(now)
-		var perunit time.Duration
-		var avg time.Duration
-		if i > 0 {
-			perunit = elapsed / time.Duration(i)
-			avg = sum / time.Duration(i)
-		}
-		log.Debug("file \"%s\": read %d entries in %v, %v/entry, %v over %v, %v avg", file, i, elapsed, perunit, over, max, avg)
+		r.key, r.val = r.cur.Next()
+		r.count++
+		return &entry
 	}
-	return nil
+}
+
+// Total returns the total number of items
+func (r *Reader) Total() int {
+	if r.bkt == nil {
+		return 0
+	}
+
+	cur := r.bkt.Cursor()
+	k, _ := cur.First()
+	if k == nil {
+		return 0
+	}
+	first := int(binary.BigEndian.Uint64(k))
+	return int(r.bkt.Sequence()+1) - first
 }

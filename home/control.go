@@ -170,9 +170,25 @@ func handleQueryLogDisable(w http.ResponseWriter, r *http.Request) {
 	httpUpdateConfigReloadDNSReturnOK(w, r)
 }
 
+type queryLogRequest struct {
+	Offset int `json:"offset"`
+}
+
 func handleQueryLog(w http.ResponseWriter, r *http.Request) {
 	log.Tracef("%s %v", r.Method, r.URL)
-	data := config.dnsServer.GetQueryLog()
+
+	reqData := queryLogRequest{}
+	err := json.NewDecoder(r.Body).Decode(&reqData)
+	if err != nil {
+		httpError(w, http.StatusBadRequest, "json decode: %s", err)
+		return
+	}
+	if reqData.Offset < 0 && reqData.Offset != -1 {
+		httpError(w, http.StatusBadRequest, "'offset' is invalid")
+		return
+	}
+
+	data := config.dnsServer.GetQueryLog(reqData.Offset)
 
 	jsonVal, err := json.Marshal(data)
 	if err != nil {
@@ -189,7 +205,7 @@ func handleQueryLog(w http.ResponseWriter, r *http.Request) {
 
 func handleStatsTop(w http.ResponseWriter, r *http.Request) {
 	log.Tracef("%s %v", r.Method, r.URL)
-	s := config.dnsServer.GetStatsTop()
+	s := config.dnsServer.GetStatsTop(int(config.DNS.QueryLogInterval) * 24)
 
 	// use manual json marshalling because we want maps to be sorted by value
 	statsJSON := bytes.Buffer{}
@@ -243,10 +259,12 @@ func handleStatsReset(w http.ResponseWriter, r *http.Request) {
 	}
 }
 
-// handleStats returns aggregated stats data for the 24 hours
+// handleStats returns aggregated stats data
 func handleStats(w http.ResponseWriter, r *http.Request) {
 	log.Tracef("%s %v", r.Method, r.URL)
-	summed := config.dnsServer.GetAggregatedStats()
+	time := int(config.DNS.QueryLogInterval) * 24
+	summed := config.dnsServer.GetAggregatedStats(time)
+	summed["stats_period"] = fmt.Sprintf("%d day(s)", time)
 
 	statsJSON, err := json.Marshal(summed)
 	if err != nil {
@@ -978,7 +996,7 @@ func registerControlHandlers() {
 	http.HandleFunc("/control/status", postInstall(optionalAuth(ensureGET(handleStatus))))
 	http.HandleFunc("/control/enable_protection", postInstall(optionalAuth(ensurePOST(handleProtectionEnable))))
 	http.HandleFunc("/control/disable_protection", postInstall(optionalAuth(ensurePOST(handleProtectionDisable))))
-	http.Handle("/control/querylog", postInstallHandler(optionalAuthHandler(gziphandler.GzipHandler(ensureGETHandler(handleQueryLog)))))
+	http.Handle("/control/querylog", postInstallHandler(optionalAuthHandler(gziphandler.GzipHandler(ensurePOSTHandler(handleQueryLog)))))
 	http.HandleFunc("/control/querylog_enable", postInstall(optionalAuth(ensurePOST(handleQueryLogEnable))))
 	http.HandleFunc("/control/querylog_disable", postInstall(optionalAuth(ensurePOST(handleQueryLogDisable))))
 	http.HandleFunc("/control/set_upstreams_config", postInstall(optionalAuth(ensurePOST(handleSetUpstreamConfig))))

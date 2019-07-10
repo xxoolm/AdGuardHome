@@ -11,39 +11,45 @@ import (
 
 	"github.com/AdguardTeam/AdGuardHome/dnsfilter"
 	"github.com/AdguardTeam/golibs/log"
+	bolt "github.com/etcd-io/bbolt"
 	"github.com/miekg/dns"
 )
 
 const (
-	logBufferCap           = 5000            // maximum capacity of logBuffer before it's flushed to disk
-	queryLogTimeLimit      = time.Hour * 24  // how far in the past we care about querylogs
-	queryLogRotationPeriod = time.Hour * 24  // rotate the log every 24 hours
-	queryLogFileName       = "querylog.json" // .gz added during compression
-	queryLogSize           = 5000            // maximum API response for /querylog
-	queryLogTopSize        = 500             // Keep in memory only top N values
+	logBufferCap           = 100       // maximum capacity of logBuffer before it's flushed to disk
+	queryLogRotationPeriod = time.Hour // time period to execute the procedure to delete expired items
+	queryLogFileName       = "querylog.db"
+	queryLogSize           = 5000 // maximum API response for /querylog
+	queryLogTopSize        = 500  // Keep in memory only top N values
 )
 
 // queryLog is a structure that writes and reads the DNS query log
 type queryLog struct {
+	timeLimit  uint    // how far in the past we care about querylogs (in hours)
 	logFile    string  // path to the log file
 	runningTop *dayTop // current top charts
+	db         *bolt.DB
 
 	logBufferLock sync.RWMutex
 	logBuffer     []*logEntry
 	fileFlushLock sync.Mutex // synchronize a file-flushing goroutine and main thread
 	flushPending  bool       // don't start another goroutine while the previous one is still running
-
-	queryLogCache []*logEntry
-	queryLogLock  sync.RWMutex
 }
 
 // newQueryLog creates a new instance of the query log
-func newQueryLog(baseDir string) *queryLog {
+func newQueryLog(baseDir string, noDB bool) *queryLog {
 	l := &queryLog{
 		logFile:    filepath.Join(baseDir, queryLogFileName),
 		runningTop: &dayTop{},
 	}
-	l.runningTop.init()
+
+	if !noDB {
+		var err error
+		l.db, err = bolt.Open(l.logFile, 0644, nil)
+		if err != nil {
+			log.Error("bolt.Open: %s", err)
+		}
+	}
 	return l
 }
 
@@ -104,13 +110,6 @@ func (l *queryLog) logRequest(question *dns.Msg, answer *dns.Msg, result *dnsfil
 		}
 	}
 	l.logBufferLock.Unlock()
-	l.queryLogLock.Lock()
-	l.queryLogCache = append(l.queryLogCache, &entry)
-	if len(l.queryLogCache) > queryLogSize {
-		toremove := len(l.queryLogCache) - queryLogSize
-		l.queryLogCache = l.queryLogCache[toremove:]
-	}
-	l.queryLogLock.Unlock()
 
 	// add it to running top
 	err = l.runningTop.addEntry(&entry, question, now)
@@ -129,21 +128,82 @@ func (l *queryLog) logRequest(question *dns.Msg, answer *dns.Msg, result *dnsfil
 	return &entry
 }
 
-// getQueryLogJson returns a map with the current query log ready to be converted to a JSON
-func (l *queryLog) getQueryLog() []map[string]interface{} {
-	l.queryLogLock.RLock()
-	values := make([]*logEntry, len(l.queryLogCache))
-	copy(values, l.queryLogCache)
-	l.queryLogLock.RUnlock()
+func min(a, b int) int {
+	if a < b {
+		return a
+	}
+	return b
+}
 
-	// reverse it so that newest is first
-	for left, right := 0, len(values)-1; left < right; left, right = left+1, right-1 {
-		values[left], values[right] = values[right], values[left]
+func (l *queryLog) getQueryLogData(rightOffset int) ([]*logEntry, int) {
+	values := []*logEntry{}
+	total := 0
+	nDbEntries := 0
+	nMemEntries := 0
+	limit := queryLogSize
+	if rightOffset == -1 {
+		rightOffset = 0
+		limit = 0
 	}
 
-	// iterate
+	l.logBufferLock.RLock()
+	nMemEntries = min(len(l.logBuffer)-rightOffset, queryLogSize)
+	if nMemEntries < 0 {
+		nMemEntries = 0
+	}
+	if limit == 0 {
+		nMemEntries = len(l.logBuffer)
+	}
+
+	r := l.OpenReader()
+	if r != nil {
+		if limit != 0 {
+			limit -= nMemEntries
+		}
+		fileOff := 0
+		if rightOffset > len(l.logBuffer) {
+			fileOff = rightOffset - len(l.logBuffer)
+		}
+
+		r.BeginRead(fileOff, limit)
+		for {
+			ent := r.Next()
+			if ent == nil {
+				break
+			}
+			values = append(values, ent)
+			nDbEntries++
+		}
+		total = r.Total()
+		r.Close()
+	}
+
+	values = append(values, l.logBuffer[:nMemEntries]...)
+	total += len(l.logBuffer)
+	l.logBufferLock.RUnlock()
+
+	log.Debug("querylog: returning %d items (%d from memory, %d from file) off:%d total:%d",
+		len(values), nMemEntries, nDbEntries, rightOffset, total)
+	return values, total
+}
+
+// getQueryLogJson returns a map with the current query log ready to be converted to a JSON
+// rightOffset: Number of items to skip from the end:
+//  ... (RESULT) [SKIP]
+//  If -1, don't limit the result and return everything we have.
+//
+// * Read items from file
+// * Read more recent items from memory (not yet written to file)
+// * Process only N last items, where N is our limit:
+//    OLD...NEW...
+//        [......]
+func (l *queryLog) getQueryLog(rightOffset int) map[string]interface{} {
+	values, total := l.getQueryLogData(rightOffset)
+
 	var data = []map[string]interface{}{}
-	for _, entry := range values {
+	n := len(values)
+	for i := n - 1; i >= 0; i-- {
+		entry := values[i]
 		var q *dns.Msg
 		var a *dns.Msg
 
@@ -198,7 +258,10 @@ func (l *queryLog) getQueryLog() []map[string]interface{} {
 		data = append(data, jsonEntry)
 	}
 
-	return data
+	obj := map[string]interface{}{}
+	obj["total"] = total
+	obj["data"] = data
+	return obj
 }
 
 func answerToMap(a *dns.Msg) []map[string]interface{} {

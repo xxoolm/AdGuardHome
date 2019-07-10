@@ -55,23 +55,31 @@ type Server struct {
 // NewServer creates a new instance of the dnsforward.Server
 // baseDir is the base directory for query logs
 // Note: this function must be called only once
-func NewServer(baseDir string) *Server {
+// testing: set TRUE for testing purpose (don't start periodic tasks in separate goroutines)
+func NewServer(baseDir string, testing bool) *Server {
 	s := &Server{
-		queryLog: newQueryLog(baseDir),
+		queryLog: newQueryLog(baseDir, testing),
 		stats:    newStats(),
 	}
 
-	log.Tracef("Loading stats from querylog")
-	err := s.queryLog.fillStatsFromQueryLog(s.stats)
-	if err != nil {
-		log.Error("failed to load stats from querylog: %s", err)
-	}
+	if !testing {
+		log.Tracef("Loading stats from querylog")
+		err := s.queryLog.fillStatsFromQueryLog(s.stats)
+		if err != nil {
+			log.Error("failed to load stats from querylog: %s", err)
+		}
 
-	log.Printf("Start DNS server periodic jobs")
-	go s.queryLog.periodicQueryLogRotate()
-	go s.queryLog.runningTop.periodicHourlyTopRotate()
-	go s.stats.statsRotator()
+		log.Printf("Start DNS server periodic jobs")
+		go s.queryLog.periodicQueryLogRotate()
+		go s.queryLog.runningTop.periodicHourlyTopRotate()
+		go s.stats.statsRotator()
+	}
 	return s
+}
+
+// Close closes the server object
+func (s *Server) Close() {
+	s.queryLog.db.Close()
 }
 
 // FilteringConfig represents the DNS filtering configuration of AdGuard Home
@@ -82,6 +90,7 @@ type FilteringConfig struct {
 	BlockingMode       string   `yaml:"blocking_mode"`        // mode how to answer filtered requests
 	BlockedResponseTTL uint32   `yaml:"blocked_response_ttl"` // if 0, then default is used (3600)
 	QueryLogEnabled    bool     `yaml:"querylog_enabled"`     // if true, query log is enabled
+	QueryLogInterval   uint     `yaml:"querylog_interval"`    // time interval for query log and statistics (in days)
 	Ratelimit          int      `yaml:"ratelimit"`            // max number of requests per second from a given IP (0 to disable)
 	RatelimitWhitelist []string `yaml:"ratelimit_whitelist"`  // a list of whitelisted client IP addresses
 	RefuseAny          bool     `yaml:"refuse_any"`           // if true, refuse ANY requests
@@ -253,6 +262,9 @@ func (s *Server) initDNSFilter(config *ServerConfig) error {
 		s.conf = *config
 	}
 
+	s.queryLog.timeLimit = s.conf.QueryLogInterval * 24
+	s.queryLog.runningTop.init(int(s.conf.QueryLogInterval) * 24)
+
 	var filters map[int]string
 	filters = nil
 	if s.conf.FilteringEnabled {
@@ -343,17 +355,17 @@ func (s *Server) ServeHTTP(w http.ResponseWriter, r *http.Request) {
 }
 
 // GetQueryLog returns a map with the current query log ready to be converted to a JSON
-func (s *Server) GetQueryLog() []map[string]interface{} {
+func (s *Server) GetQueryLog(rightOffset int) map[string]interface{} {
 	s.RLock()
 	defer s.RUnlock()
-	return s.queryLog.getQueryLog()
+	return s.queryLog.getQueryLog(rightOffset)
 }
 
 // GetStatsTop returns the current stop stats
-func (s *Server) GetStatsTop() *StatsTop {
+func (s *Server) GetStatsTop(hourOffset int) *StatsTop {
 	s.RLock()
 	defer s.RUnlock()
-	return s.queryLog.runningTop.getStatsTop()
+	return s.queryLog.runningTop.getStatsTop(hourOffset)
 }
 
 // PurgeStats purges current server stats
@@ -363,11 +375,11 @@ func (s *Server) PurgeStats() {
 	s.stats.purgeStats()
 }
 
-// GetAggregatedStats returns aggregated stats data for the 24 hours
-func (s *Server) GetAggregatedStats() map[string]interface{} {
+// GetAggregatedStats returns aggregated stats data
+func (s *Server) GetAggregatedStats(hourOffset int) map[string]interface{} {
 	s.RLock()
 	defer s.RUnlock()
-	return s.stats.getAggregatedStats()
+	return s.stats.getAggregatedStats(hourOffset)
 }
 
 // GetStatsHistory gets stats history aggregated by the specified time unit
