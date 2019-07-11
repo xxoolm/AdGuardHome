@@ -34,6 +34,13 @@ Contents:
 * Services Filter
 	* API: Get blocked services list
 	* API: Set blocked services list
+* Query log
+	* Adding new data
+	* Getting data
+	* Removing old data
+	* API: Get query log
+	* API: Set query log parameters
+	* API: Get query log parameters
 
 
 ## First startup
@@ -800,3 +807,109 @@ Request:
 Response:
 
 	200 OK
+
+
+## Query log
+
+When a new DNS request is received and processed, we store information about this event in "query log".  It is a file on disk which is a key-value storage.  Key is a unique ID.  Value is a data stored in gob (Go binary) format.
+
+
+### Adding new data
+
+First, new data is stored in a memory region.  When this array is filled to a particular amount of entries (e.g. 100), we flush this data to a file and clear the array.
+
+
+### Getting data
+
+When UI asks for data from query log (see "API: Get query log"), server reads the newest entries from memory array and the file.  The maximum number of items returned per one request is limited by configuration.
+To get the next chunk of data (the older log entries) UI needs to specify an offset number which tells the server how many items it needs to skip from the end of log.
+
+
+### Removing old data
+
+We store data for a limited amount of time, so the old entries are removed from DB automatically.  This process is first started on application startup and then every hour.  Server iterates over log elements from the beginning and removes them until it meets the entry with timestamp which is within the time range set by configuration.
+
+
+### API: Get query log
+
+Request:
+
+	POST /control/querylog
+
+	{
+	offset: 500 // position from the end of log (server reads a chunk of older entries until there are 500 newer entries left)
+
+	filter:{
+		domain: "..."
+		type: "..."
+		response: "all" | "filtered"
+		client: "..."
+	}
+	}
+
+If request contains `offset: -1` then user wants to download the whole query log file.
+
+If "filter" settings are set, server returns only entries that match the specified request.  In this case "offset" value is the offset of filtered entries, as expected.  Note that this filtering will perform poorly (O(n)) because we don't have any indexes: server sequentially reverse-scans all elements until it finds the needed data.
+
+Response:
+
+	{
+	total: 123123 // total number of log elements
+	data: [
+	{
+		"answer":[
+			{
+			"ttl":10,
+			"type":"AAAA",
+			"value":"::"
+			}
+			...
+		],
+		"client":"127.0.0.1",
+		"elapsedMs":"0.098403",
+		"filterId":1,
+		"question":{
+			"class":"IN",
+			"host":"doubleclick.net",
+			"type":"AAAA"
+		},
+		"reason":"FilteredBlackList",
+		"rule":"||doubleclick.net^",
+		"status":"NOERROR",
+		"time":"2019-07-11T18:57:49+03:00"
+	}
+	...
+	]
+	}
+
+The most recent entries are at the top of list.
+
+
+### API: Set query log parameters
+
+Request:
+
+	POST /control/querylog_config
+
+	{
+		"interval": 1 | 7 | 30 | 90
+	}
+
+Response:
+
+	200 OK
+
+
+### API: Get query log parameters
+
+Request:
+
+	GET /control/querylog_info
+
+Response:
+
+	200 OK
+
+	{
+		"interval": 1 | 7 | 30 | 90
+	}
