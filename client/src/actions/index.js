@@ -339,15 +339,16 @@ export const getLogsRequest = createAction('GET_LOGS_REQUEST');
 export const getLogsFailure = createAction('GET_LOGS_FAILURE');
 export const getLogsSuccess = createAction('GET_LOGS_SUCCESS');
 
-export const getLogs = () => async (dispatch, getState) => {
+export const getLogs = (offset = 0) => async (dispatch, getState) => {
     dispatch(getLogsRequest());
     const timer = setInterval(async () => {
         const state = getState();
         if (state.dashboard.isCoreRunning) {
             clearInterval(timer);
             try {
-                const logs = normalizeLogs(await apiClient.getQueryLog());
-                dispatch(getLogsSuccess(logs));
+                const logs = await apiClient.getQueryLog({ offset });
+                const normalizedLogs = normalizeLogs(logs.data);
+                dispatch(getLogsSuccess({ logs: normalizedLogs, total: logs.total }));
             } catch (error) {
                 dispatch(addErrorToast({ error }));
                 dispatch(getLogsFailure(error));

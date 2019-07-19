@@ -223,14 +223,21 @@ const dashboard = handleActions({
 const queryLogs = handleActions({
     [actions.getLogsRequest]: state => ({ ...state, getLogsProcessing: true }),
     [actions.getLogsFailure]: state => ({ ...state, getLogsProcessing: false }),
-    [actions.getLogsSuccess]: (state, { payload }) => {
-        const newState = { ...state, logs: payload, getLogsProcessing: false };
-        return newState;
-    },
+    [actions.getLogsSuccess]: (state, { payload }) => ({
+        ...state,
+        logs: payload.logs,
+        total: payload.total,
+        getLogsProcessing: false,
+    }),
     [actions.downloadQueryLogRequest]: state => ({ ...state, logsDownloading: true }),
     [actions.downloadQueryLogFailure]: state => ({ ...state, logsDownloading: false }),
     [actions.downloadQueryLogSuccess]: state => ({ ...state, logsDownloading: false }),
-}, { getLogsProcessing: false, logsDownloading: false });
+}, {
+    getLogsProcessing: false,
+    logsDownloading: false,
+    total: 0,
+    logs: [],
+});
 
 const filtering = handleActions({
     [actions.setRulesRequest]: state => ({ ...state, processingRules: true }),

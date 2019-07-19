@@ -31,7 +31,7 @@ export default class Api {
     GLOBAL_STATUS = { path: 'status', method: 'GET' };
     GLOBAL_STOP = { path: 'stop', method: 'POST' };
     GLOBAL_STATS_TOP = { path: 'stats_top', method: 'GET' };
-    GLOBAL_QUERY_LOG = { path: 'querylog', method: 'GET' };
+    GLOBAL_QUERY_LOG = { path: 'querylog', method: 'POST' };
     GLOBAL_QUERY_LOG_ENABLE = { path: 'querylog_enable', method: 'POST' };
     GLOBAL_QUERY_LOG_DISABLE = { path: 'querylog_disable', method: 'POST' };
     GLOBAL_SET_UPSTREAM_DNS = { path: 'set_upstreams_config', method: 'POST' };
@@ -86,15 +86,22 @@ export default class Api {
         return this.makeRequest(path, method);
     }
 
-    getQueryLog() {
+    getQueryLog(data) {
         const { path, method } = this.GLOBAL_QUERY_LOG;
-        return this.makeRequest(path, method);
+        const config = {
+            data,
+            headers: { 'Content-Type': 'application/json' },
+        };
+        return this.makeRequest(path, method, config);
     }
 
     downloadQueryLog() {
         const { path, method } = this.GLOBAL_QUERY_LOG;
-        const queryString = '?download=1';
-        return this.makeRequest(path + queryString, method);
+        const config = {
+            data: { offset: -1 },
+            headers: { 'Content-Type': 'application/json' },
+        };
+        return this.makeRequest(path, method, config);
     }
 
     enableQueryLog() {
