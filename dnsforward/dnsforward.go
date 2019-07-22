@@ -63,11 +63,13 @@ func NewServer(baseDir string, testing bool) *Server {
 	}
 
 	if !testing {
-		log.Tracef("Loading stats from querylog")
-		err := s.queryLog.fillStatsFromQueryLog(s.stats)
-		if err != nil {
-			log.Error("failed to load stats from querylog: %s", err)
-		}
+		go func() {
+			log.Tracef("Loading stats from querylog")
+			err := s.queryLog.fillStatsFromQueryLog(s.stats)
+			if err != nil {
+				log.Error("failed to load stats from querylog: %s", err)
+			}
+		}()
 
 		log.Printf("Start DNS server periodic jobs")
 		go s.queryLog.periodicQueryLogRotate()
