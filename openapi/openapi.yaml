@@ -205,7 +205,17 @@ paths:
             tags:
                 - log
             operationId: querylogDisable
-            summary: 'Disable filtering'
+            summary: 'Disable querylog'
+            responses:
+                200:
+                    description: OK
+
+    /querylog_clear:
+        post:
+            tags:
+                - log
+            operationId: querylogClear
+            summary: 'Clear query log'
             responses:
                 200:
                     description: OK
