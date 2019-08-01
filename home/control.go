@@ -170,6 +170,52 @@ func handleQueryLogDisable(w http.ResponseWriter, r *http.Request) {
 	httpUpdateConfigReloadDNSReturnOK(w, r)
 }
 
+type queryLogConfig struct {
+	Interval uint `json:"interval"`
+}
+
+func handleQueryLogInfo(w http.ResponseWriter, r *http.Request) {
+	log.Tracef("%s %v", r.Method, r.URL)
+
+	resp := queryLogConfig{}
+	resp.Interval = config.DNS.QueryLogInterval
+
+	jsonVal, err := json.Marshal(resp)
+	if err != nil {
+		httpError(w, http.StatusInternalServerError, "Couldn't marshal data into json: %s", err)
+		return
+	}
+	w.Header().Set("Content-Type", "application/json")
+	_, err = w.Write(jsonVal)
+	if err != nil {
+		httpError(w, http.StatusInternalServerError, "Unable to write response json: %s", err)
+	}
+}
+
+func checkQueryLogInterval(i uint) bool {
+	return i == 1 || i == 7 || i == 30 || i == 90
+}
+
+func handleQueryLogConfig(w http.ResponseWriter, r *http.Request) {
+	log.Tracef("%s %v", r.Method, r.URL)
+
+	reqData := queryLogConfig{}
+	err := json.NewDecoder(r.Body).Decode(&reqData)
+	if err != nil {
+		httpError(w, http.StatusBadRequest, "json decode: %s", err)
+		return
+	}
+
+	if !checkQueryLogInterval(reqData.Interval) {
+		httpError(w, http.StatusBadRequest, "Unsupported interval")
+		return
+	}
+
+	config.DNS.QueryLogInterval = reqData.Interval
+
+	httpUpdateConfigReloadDNSReturnOK(w, r)
+}
+
 type queryLogRequest struct {
 	Offset int `json:"offset"`
 }
@@ -997,6 +1043,8 @@ func registerControlHandlers() {
 	http.HandleFunc("/control/enable_protection", postInstall(optionalAuth(ensurePOST(handleProtectionEnable))))
 	http.HandleFunc("/control/disable_protection", postInstall(optionalAuth(ensurePOST(handleProtectionDisable))))
 	http.Handle("/control/querylog", postInstallHandler(optionalAuthHandler(gziphandler.GzipHandler(ensurePOSTHandler(handleQueryLog)))))
+	http.HandleFunc("/control/querylog_config", postInstall(optionalAuth(ensurePOST(handleQueryLogConfig))))
+	http.HandleFunc("/control/querylog_info", postInstall(optionalAuth(ensureGET(handleQueryLogInfo))))
 	http.HandleFunc("/control/querylog_enable", postInstall(optionalAuth(ensurePOST(handleQueryLogEnable))))
 	http.HandleFunc("/control/querylog_disable", postInstall(optionalAuth(ensurePOST(handleQueryLogDisable))))
 	http.HandleFunc("/control/set_upstreams_config", postInstall(optionalAuth(ensurePOST(handleSetUpstreamConfig))))
