@@ -60,8 +60,13 @@ func initDNSServer(baseDir string) {
 	go asyncRDNSLoop()
 	go func() {
 		top := config.dnsServer.GetStatsTop(int(config.DNS.QueryLogInterval) * 24)
+		i := 0
 		for k := range top.Clients {
 			beginAsyncRDNS(k)
+			i++
+			if i == 30 {
+				break
+			}
 		}
 	}()
 }
