@@ -35,6 +35,7 @@ type dayTop struct {
 }
 
 func (d *dayTop) init(limit int) {
+	d.hoursLock.Lock()
 	d.limit = limit
 	d.hours = []*hourTop{}
 	for i := 0; i < limit; i++ {
@@ -42,6 +43,7 @@ func (d *dayTop) init(limit int) {
 		hour.init()
 		d.hours = append(d.hours, &hour)
 	}
+	d.hoursLock.Unlock()
 }
 
 func (d *dayTop) rotateHourlyTop() {
@@ -191,6 +193,7 @@ func (d *dayTop) addEntry(entry *logEntry, q *dns.Msg, now time.Time) error {
 
 func (l *queryLog) fillStatsFromQueryLog(s *stats) error {
 	now := time.Now()
+	validFrom := now.Unix() - int64(l.timeLimit*60*60)
 
 	r := l.OpenReader()
 	if r == nil {
@@ -205,7 +208,7 @@ func (l *queryLog) fillStatsFromQueryLog(s *stats) error {
 			break
 		}
 
-		if uint(now.Sub(entry.Time).Hours()) > l.timeLimit {
+		if entry.Time.Unix() < validFrom {
 			continue
 		}
 

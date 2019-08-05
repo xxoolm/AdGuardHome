@@ -39,7 +39,7 @@ func initDNSServer(baseDir string) {
 		log.Fatalf("Cannot create DNS data dir at %s: %s", baseDir, err)
 	}
 
-	config.dnsServer = dnsforward.NewServer(baseDir, false)
+	config.dnsServer = dnsforward.NewServer(config.DNS.FilteringConfig, baseDir, false)
 
 	bindhost := config.DNS.BindHost
 	if config.DNS.BindHost == "0.0.0.0" {

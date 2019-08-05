@@ -56,13 +56,16 @@ type Server struct {
 // baseDir is the base directory for query logs
 // Note: this function must be called only once
 // testing: set TRUE for testing purpose (don't start periodic tasks in separate goroutines)
-func NewServer(baseDir string, testing bool) *Server {
+func NewServer(config FilteringConfig, baseDir string, testing bool) *Server {
 	s := &Server{
-		queryLog: newQueryLog(baseDir, testing),
+		queryLog: newQueryLog(baseDir, false),
 		stats:    newStats(),
 	}
 
 	if !testing {
+		s.queryLog.timeLimit = config.QueryLogInterval * 24
+		s.queryLog.runningTop.init(int(config.QueryLogInterval) * 24)
+
 		go func() {
 			log.Tracef("Loading stats from querylog")
 			err := s.queryLog.fillStatsFromQueryLog(s.stats)
@@ -81,7 +84,10 @@ func NewServer(baseDir string, testing bool) *Server {
 
 // Close closes the server object
 func (s *Server) Close() {
-	s.queryLog.db.Close()
+	if s.queryLog.db != nil {
+		s.queryLog.db.Close()
+		s.queryLog.db = nil
+	}
 }
 
 // FilteringConfig represents the DNS filtering configuration of AdGuard Home

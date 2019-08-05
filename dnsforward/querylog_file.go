@@ -273,7 +273,7 @@ func (r *Reader) Next() *logEntry {
 			return nil
 		}
 
-		log.Tracef("Read: %v size:%d", r.key, len(r.val))
+		// log.Tracef("Read: %v size:%d", r.key, len(r.val))
 
 		var entry logEntry
 		var buf bytes.Buffer
@@ -281,7 +281,7 @@ func (r *Reader) Next() *logEntry {
 		dec := gob.NewDecoder(&buf)
 		err := dec.Decode(&entry)
 		if err != nil {
-			log.Debug("dec.Decode: %s", err)
+			log.Debug("gob decode: %s", err)
 			r.key, r.val = r.cur.Next()
 			continue
 		}

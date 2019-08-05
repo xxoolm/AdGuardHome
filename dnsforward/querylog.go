@@ -37,6 +37,7 @@ type queryLog struct {
 }
 
 // newQueryLog creates a new instance of the query log
+// noDB: if TRUE, don't open/create database file
 func newQueryLog(baseDir string, noDB bool) *queryLog {
 	l := &queryLog{
 		logFile:    filepath.Join(baseDir, queryLogFileName),
