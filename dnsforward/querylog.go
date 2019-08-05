@@ -128,31 +128,28 @@ func (l *queryLog) logRequest(question *dns.Msg, answer *dns.Msg, result *dnsfil
 	return &entry
 }
 
-func min(a, b int) int {
-	if a < b {
-		return a
-	}
-	return b
-}
-
-func (l *queryLog) getQueryLogData(rightOffset int) ([]*logEntry, int) {
+func (l *queryLog) getQueryLogData(rightOffset, limit int) ([]*logEntry, int) {
 	values := []*logEntry{}
 	total := 0
 	nDbEntries := 0
 	nMemEntries := 0
-	limit := queryLogSize
 	if rightOffset == -1 {
 		rightOffset = 0
 		limit = 0
 	}
 
 	l.logBufferLock.RLock()
-	nMemEntries = min(len(l.logBuffer)-rightOffset, queryLogSize)
-	if nMemEntries < 0 {
-		nMemEntries = 0
-	}
+
 	if limit == 0 {
 		nMemEntries = len(l.logBuffer)
+	} else {
+		nMemEntries = len(l.logBuffer) - rightOffset
+		if nMemEntries < 0 {
+			nMemEntries = 0
+		}
+		if nMemEntries > limit {
+			nMemEntries = limit
+		}
 	}
 
 	r := l.OpenReader()
@@ -198,7 +195,7 @@ func (l *queryLog) getQueryLogData(rightOffset int) ([]*logEntry, int) {
 //    OLD...NEW...
 //        [......]
 func (l *queryLog) getQueryLog(rightOffset int) map[string]interface{} {
-	values, total := l.getQueryLogData(rightOffset)
+	values, total := l.getQueryLogData(rightOffset, queryLogSize)
 
 	var data = []map[string]interface{}{}
 	n := len(values)

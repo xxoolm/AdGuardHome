@@ -696,7 +696,7 @@ func TestQueryLog(t *testing.T) {
 	_ = os.Remove(queryLogFileName)
 	ql := newQueryLog(".", false)
 
-	data, total = ql.getQueryLogData(0)
+	data, total = ql.getQueryLogData(0, 500)
 	assert.True(t, total == 0)
 
 	n := 0
@@ -713,26 +713,26 @@ func TestQueryLog(t *testing.T) {
 		ql.logRequest(&dns.Msg{}, &dns.Msg{}, &dnsfilter.Result{}, time.Duration(n), a, "up1")
 	}
 
-	data, total = ql.getQueryLogData(0)
+	data, total = ql.getQueryLogData(0, 500)
 	assert.True(t, total == n && len(data) == n)
 	assert.True(t, checkEntries(data))
 
-	data, total = ql.getQueryLogData(-1)
+	data, total = ql.getQueryLogData(-1, 500)
 	assert.True(t, total == n && len(data) == n)
 	assert.True(t, checkEntries(data))
 
 	// get data (skip the last 1)
-	data, total = ql.getQueryLogData(1)
+	data, total = ql.getQueryLogData(1, 500)
 	assert.True(t, len(data) == n-1)
 	assert.True(t, checkEntries(data))
 
 	// get data (skip the last 4)
-	data, total = ql.getQueryLogData(4)
+	data, total = ql.getQueryLogData(4, 500)
 	assert.True(t, len(data) == n-4)
 	assert.True(t, checkEntries(data))
 
 	// get data with offset larger than total number
-	data, total = ql.getQueryLogData(n)
+	data, total = ql.getQueryLogData(n, 500)
 	assert.True(t, len(data) == 0)
 
 	_ = os.Remove(queryLogFileName)
