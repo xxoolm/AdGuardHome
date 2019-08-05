@@ -51,11 +51,12 @@ func itob(v int) []byte {
 
 // flushToFile saves the specified log entries to the query log file
 func (l *queryLog) flushToFile(buffer []*logEntry) error {
-	if len(buffer) == 0 {
-		log.Debug("querylog: there's nothing to write to a file")
+	if l.db == nil {
 		return nil
 	}
-	if l.db == nil {
+
+	if len(buffer) == 0 {
+		log.Debug("querylog: there's nothing to write to a file")
 		return nil
 	}
 	start := time.Now()
@@ -108,6 +109,10 @@ func (l *queryLog) flushToFile(buffer []*logEntry) error {
 
 // Remove old items from query log
 func (l *queryLog) rotateQueryLog() error {
+	if l.db == nil {
+		return nil
+	}
+
 	now := time.Now()
 	validFrom := now.Unix() - int64(l.timeLimit*60*60)
 
@@ -189,6 +194,10 @@ type Reader struct {
 
 // OpenReader locks the file and returns reader object or nil on error
 func (l *queryLog) OpenReader() *Reader {
+	if l.db == nil {
+		return nil
+	}
+
 	r := Reader{}
 	r.now = time.Now()
 
