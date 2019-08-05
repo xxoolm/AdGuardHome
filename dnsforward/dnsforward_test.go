@@ -737,3 +737,32 @@ func TestQueryLog(t *testing.T) {
 
 	_ = os.Remove(queryLogFileName)
 }
+
+// Create a huge query log file
+func testCreateHugeQueryLog(t *testing.T) {
+	_ = os.Remove(queryLogFileName)
+	ql := newQueryLog(".", false)
+
+	for n := 0; n != 500000; n++ {
+		a := &net.UDPAddr{IP: net.IP{127, 2, 3, byte(n % 255)}, Port: 123}
+
+		q := dns.Msg{}
+		q.Question = []dns.Question{dns.Question{Name: "host."}}
+
+		ans := dns.Msg{}
+		ans.Question = []dns.Question{dns.Question{Name: "host."}}
+		arec := dns.A{}
+		arec.Hdr.Name = "host."
+		arec.A = net.IP{1, 2, 3, 4}
+		ans.Answer = append(ans.Answer, &arec)
+
+		ql.logRequest(&q, &ans, &dnsfilter.Result{}, time.Duration(n), a, "up1")
+
+		if ((n + 1) % 10000) == 0 {
+			// give time to flush to a file
+			time.Sleep(300 * time.Millisecond)
+		}
+	}
+
+	// _ = os.Remove(queryLogFileName)
+}
