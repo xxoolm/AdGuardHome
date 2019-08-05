@@ -35,14 +35,22 @@ type dayTop struct {
 }
 
 func (d *dayTop) init(limit int) {
-	d.hoursLock.Lock()
-	d.limit = limit
-	d.hours = []*hourTop{}
+	a := []*hourTop{}
 	for i := 0; i < limit; i++ {
 		hour := hourTop{}
 		hour.init()
-		d.hours = append(d.hours, &hour)
+		a = append(a, &hour)
 	}
+
+	d.hoursLock.Lock()
+	if len(d.hours) == 0 {
+		d.hours = a
+	} else if limit > d.limit {
+		d.hours = append(d.hours, a[:limit-d.limit]...)
+	} else if limit < d.limit {
+		d.hours = d.hours[:d.limit-limit]
+	}
+	d.limit = limit
 	d.hoursLock.Unlock()
 }
 
