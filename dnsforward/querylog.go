@@ -29,11 +29,48 @@ type queryLog struct {
 	logFile    string  // path to the log file
 	runningTop *dayTop // current top charts
 	db         *bolt.DB
+	dbLock     sync.Mutex
 
 	logBufferLock sync.RWMutex
 	logBuffer     []*logEntry
 	fileFlushLock sync.Mutex // synchronize a file-flushing goroutine and main thread
 	flushPending  bool       // don't start another goroutine while the previous one is still running
+}
+
+func (l *queryLog) dbOpen() {
+	var err error
+	l.db, err = bolt.Open(l.logFile, 0644, nil)
+	if err != nil {
+		log.Error("bolt.Open: %s", err)
+	}
+}
+
+func (l *queryLog) dbReopen() {
+	l.dbLock.Lock()
+	if l.db != nil {
+		l.db.Close()
+	}
+
+	var err error
+	l.db, err = bolt.Open(l.logFile, 0644, nil)
+	if err != nil {
+		log.Error("bolt.Open: %s", err)
+	}
+	l.dbLock.Unlock()
+}
+
+func (l *queryLog) dbBeginTxn() *bolt.Tx {
+	l.dbLock.Lock()
+	defer l.dbLock.Unlock()
+	if l.db == nil {
+		return nil
+	}
+	tx, err := l.db.Begin(true)
+	if err != nil {
+		log.Error("db.Begin: %s", err)
+		return nil
+	}
+	return tx
 }
 
 // newQueryLog creates a new instance of the query log
@@ -45,11 +82,7 @@ func newQueryLog(baseDir string, noDB bool) *queryLog {
 	}
 
 	if !noDB {
-		var err error
-		l.db, err = bolt.Open(l.logFile, 0644, nil)
-		if err != nil {
-			log.Error("bolt.Open: %s", err)
-		}
+		l.dbOpen()
 	}
 	return l
 }

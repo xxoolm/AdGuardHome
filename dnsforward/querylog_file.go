@@ -51,19 +51,14 @@ func itob(v int) []byte {
 
 // flushToFile saves the specified log entries to the query log file
 func (l *queryLog) flushToFile(buffer []*logEntry) error {
-	if l.db == nil {
-		return nil
-	}
-
 	if len(buffer) == 0 {
 		log.Debug("querylog: there's nothing to write to a file")
 		return nil
 	}
 	start := time.Now()
 
-	tx, err := l.db.Begin(true)
-	if err != nil {
-		log.Error("db.Begin: %s", err)
+	tx := l.dbBeginTxn()
+	if tx == nil {
 		return nil
 	}
 	defer tx.Rollback()
@@ -109,18 +104,13 @@ func (l *queryLog) flushToFile(buffer []*logEntry) error {
 
 // Remove old items from query log
 func (l *queryLog) rotateQueryLog() error {
-	if l.db == nil {
-		return nil
-	}
-
 	now := time.Now()
 	validFrom := now.Unix() - int64(l.timeLimit*60*60)
 
 	log.Debug("querylog: removing old items")
 
-	tx, err := l.db.Begin(true)
-	if err != nil {
-		log.Error("db.Begin: %s", err)
+	tx := l.dbBeginTxn()
+	if tx == nil {
 		return nil
 	}
 	defer tx.Rollback()
@@ -155,7 +145,7 @@ func (l *queryLog) rotateQueryLog() error {
 		n++
 	}
 
-	err = tx.Commit()
+	err := tx.Commit()
 	if err != nil {
 		log.Error("tx.Commit: %s", err)
 		return nil
@@ -194,17 +184,11 @@ type Reader struct {
 
 // OpenReader locks the file and returns reader object or nil on error
 func (l *queryLog) OpenReader() *Reader {
-	if l.db == nil {
-		return nil
-	}
-
 	r := Reader{}
 	r.now = time.Now()
 
-	var err error
-	r.tx, err = l.db.Begin(false)
-	if err != nil {
-		log.Error("db.Begin: %s", err)
+	r.tx = l.dbBeginTxn()
+	if r.tx == nil {
 		return nil
 	}
 	return &r

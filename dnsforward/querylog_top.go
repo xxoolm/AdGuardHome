@@ -251,6 +251,9 @@ func (l *queryLog) fillStatsFromQueryLog(s *stats) error {
 	}
 
 	r.Close()
+
+	// After we've read the whole file, bolt might have used too much memory (via mmap())
+	l.dbReopen()
 	return nil
 }
 
