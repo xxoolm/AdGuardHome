@@ -57,7 +57,7 @@ func (l *queryLog) flushToFile(buffer []*logEntry) error {
 	}
 	start := time.Now()
 
-	tx := l.dbBeginTxn()
+	tx := l.dbBeginTxn(true)
 	if tx == nil {
 		return nil
 	}
@@ -109,7 +109,7 @@ func (l *queryLog) rotateQueryLog() error {
 
 	log.Debug("querylog: removing old items")
 
-	tx := l.dbBeginTxn()
+	tx := l.dbBeginTxn(true)
 	if tx == nil {
 		return nil
 	}
@@ -187,7 +187,7 @@ func (l *queryLog) OpenReader() *Reader {
 	r := Reader{}
 	r.now = time.Now()
 
-	r.tx = l.dbBeginTxn()
+	r.tx = l.dbBeginTxn(false)
 	if r.tx == nil {
 		return nil
 	}

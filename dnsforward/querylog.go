@@ -46,7 +46,9 @@ func (l *queryLog) dbOpen() {
 }
 
 func (l *queryLog) dbReopen() {
+	log.Tracef("Reopening...")
 	l.dbLock.Lock()
+	defer l.dbLock.Unlock()
 	if l.db != nil {
 		l.db.Close()
 	}
@@ -56,20 +58,22 @@ func (l *queryLog) dbReopen() {
 	if err != nil {
 		log.Error("bolt.Open: %s", err)
 	}
-	l.dbLock.Unlock()
+	log.Tracef("Reopened ok")
 }
 
-func (l *queryLog) dbBeginTxn() *bolt.Tx {
+func (l *queryLog) dbBeginTxn(writeable bool) *bolt.Tx {
+	log.Tracef("Opening transaction...")
 	l.dbLock.Lock()
 	defer l.dbLock.Unlock()
 	if l.db == nil {
 		return nil
 	}
-	tx, err := l.db.Begin(true)
+	tx, err := l.db.Begin(writeable)
 	if err != nil {
 		log.Error("db.Begin: %s", err)
 		return nil
 	}
+	log.Tracef("Transaction opened")
 	return tx
 }
 
