@@ -25,7 +25,7 @@ const (
 
 // queryLog is a structure that writes and reads the DNS query log
 type queryLog struct {
-	timeLimit  uint    // how far in the past we care about querylogs (in hours)
+	timeLimit  uint    // how far in the past we care about querylogs (in days)
 	logFile    string  // path to the log file
 	runningTop *dayTop // current top charts
 	db         *bolt.DB

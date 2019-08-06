@@ -34,6 +34,7 @@ type dayTop struct {
 	hoursLock sync.RWMutex // writelock this lock ONLY WHEN rotating or intializing hours!
 }
 
+// limit: time interval (in hours) to keep statistics
 func (d *dayTop) init(limit int) {
 	a := []*hourTop{}
 	for i := 0; i < limit; i++ {
@@ -201,7 +202,7 @@ func (d *dayTop) addEntry(entry *logEntry, q *dns.Msg, now time.Time) error {
 
 func (l *queryLog) fillStatsFromQueryLog(s *stats) error {
 	now := time.Now()
-	validFrom := now.Unix() - int64(l.timeLimit*60*60)
+	validFrom := now.Unix() - int64(l.timeLimit*24*60*60)
 
 	r := l.OpenReader()
 	if r == nil {

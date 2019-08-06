@@ -63,7 +63,7 @@ func NewServer(config FilteringConfig, baseDir string, testing bool) *Server {
 	}
 
 	if !testing {
-		s.queryLog.timeLimit = config.QueryLogInterval * 24
+		s.queryLog.timeLimit = config.QueryLogInterval
 		s.queryLog.runningTop.init(int(config.QueryLogInterval) * 24)
 
 		go func() {
@@ -270,7 +270,7 @@ func (s *Server) initDNSFilter(config *ServerConfig) error {
 		s.conf = *config
 	}
 
-	s.queryLog.timeLimit = s.conf.QueryLogInterval * 24
+	s.queryLog.timeLimit = s.conf.QueryLogInterval
 	s.queryLog.runningTop.init(int(s.conf.QueryLogInterval) * 24)
 
 	var filters map[int]string

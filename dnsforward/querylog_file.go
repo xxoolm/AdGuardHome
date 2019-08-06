@@ -105,7 +105,7 @@ func (l *queryLog) flushToFile(buffer []*logEntry) error {
 // Remove old items from query log
 func (l *queryLog) rotateQueryLog() error {
 	now := time.Now()
-	validFrom := now.Unix() - int64(l.timeLimit*60*60)
+	validFrom := now.Unix() - int64(l.timeLimit*24*60*60)
 
 	log.Debug("querylog: removing old items")
 
