@@ -59,7 +59,7 @@ func initDNSServer(baseDir string) {
 	config.dnsctx.rdnsChannel = make(chan string, 256)
 	go asyncRDNSLoop()
 	go func() {
-		top := config.dnsServer.GetStatsTop(int(config.DNS.QueryLogInterval) * 24)
+		top := config.dnsServer.GetStatsTop()
 		i := 0
 		for k := range top.Clients {
 			beginAsyncRDNS(k)

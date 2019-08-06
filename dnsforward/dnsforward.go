@@ -370,10 +370,10 @@ func (s *Server) GetQueryLog(rightOffset int) map[string]interface{} {
 }
 
 // GetStatsTop returns the current stop stats
-func (s *Server) GetStatsTop(hourOffset int) *StatsTop {
+func (s *Server) GetStatsTop() *StatsTop {
 	s.RLock()
 	defer s.RUnlock()
-	return s.queryLog.runningTop.getStatsTop(hourOffset)
+	return s.queryLog.runningTop.getStatsTop(int(s.conf.QueryLogInterval) * 24)
 }
 
 // PurgeStats purges current server stats
@@ -384,10 +384,10 @@ func (s *Server) PurgeStats() {
 }
 
 // GetAggregatedStats returns aggregated stats data
-func (s *Server) GetAggregatedStats(hourOffset int) map[string]interface{} {
+func (s *Server) GetAggregatedStats() map[string]interface{} {
 	s.RLock()
 	defer s.RUnlock()
-	return s.stats.getAggregatedStats(hourOffset)
+	return s.stats.getAggregatedStats(int(s.conf.QueryLogInterval) * 24)
 }
 
 // GetStatsHistory gets stats history aggregated by the specified time unit

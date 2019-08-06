@@ -251,7 +251,7 @@ func handleQueryLog(w http.ResponseWriter, r *http.Request) {
 
 func handleStatsTop(w http.ResponseWriter, r *http.Request) {
 	log.Tracef("%s %v", r.Method, r.URL)
-	s := config.dnsServer.GetStatsTop(int(config.DNS.QueryLogInterval) * 24)
+	s := config.dnsServer.GetStatsTop()
 
 	// use manual json marshalling because we want maps to be sorted by value
 	statsJSON := bytes.Buffer{}
@@ -308,9 +308,8 @@ func handleStatsReset(w http.ResponseWriter, r *http.Request) {
 // handleStats returns aggregated stats data
 func handleStats(w http.ResponseWriter, r *http.Request) {
 	log.Tracef("%s %v", r.Method, r.URL)
-	time := int(config.DNS.QueryLogInterval) * 24
-	summed := config.dnsServer.GetAggregatedStats(time)
-	summed["stats_period"] = fmt.Sprintf("%d day(s)", time)
+	summed := config.dnsServer.GetAggregatedStats()
+	summed["stats_period"] = fmt.Sprintf("%d day(s)", config.DNS.QueryLogInterval)
 
 	statsJSON, err := json.Marshal(summed)
 	if err != nil {
