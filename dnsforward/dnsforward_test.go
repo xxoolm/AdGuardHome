@@ -15,6 +15,8 @@ import (
 	"testing"
 	"time"
 
+	"github.com/AdguardTeam/golibs/log"
+
 	"github.com/AdguardTeam/AdGuardHome/dnsfilter"
 	"github.com/AdguardTeam/dnsproxy/proxy"
 	"github.com/miekg/dns"
@@ -739,11 +741,14 @@ func TestQueryLog(t *testing.T) {
 }
 
 // Create a huge query log file
-func testCreateHugeQueryLog(t *testing.T) {
+func TestCreateHugeQueryLog(t *testing.T) {
 	_ = os.Remove(queryLogFileName)
 	ql := newQueryLog(".", false)
+	ql.timeLimit = 1
+	ql.runningTop.init(1 * 24)
+	log.SetLevel(log.DEBUG)
 
-	for n := 0; n != 500000; n++ {
+	for n := 0; n != 50000; n++ {
 		a := &net.UDPAddr{IP: net.IP{127, 2, 3, byte(n % 255)}, Port: 123}
 
 		q := dns.Msg{}
@@ -760,9 +765,15 @@ func testCreateHugeQueryLog(t *testing.T) {
 
 		if ((n + 1) % 10000) == 0 {
 			// give time to flush to a file
-			time.Sleep(300 * time.Millisecond)
+			time.Sleep(1 * time.Second)
 		}
 	}
 
-	// _ = os.Remove(queryLogFileName)
+	// give time to flush to a file
+	time.Sleep(1 * time.Second)
+
+	s := newStats()
+	ql.fillStatsFromQueryLog(s)
+
+	_ = os.Remove(queryLogFileName)
 }

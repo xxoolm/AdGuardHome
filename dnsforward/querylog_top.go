@@ -7,6 +7,7 @@ import (
 	"runtime"
 	"strings"
 	"sync"
+	"syscall"
 	"time"
 
 	"github.com/AdguardTeam/golibs/log"
@@ -209,6 +210,9 @@ func (l *queryLog) fillStatsFromQueryLog(s *stats) error {
 		return nil
 	}
 
+	ru := syscall.Rusage{}
+	syscall.Getrusage(0, &ru)
+
 	r.BeginRead(0, 0)
 
 	for {
@@ -252,6 +256,10 @@ func (l *queryLog) fillStatsFromQueryLog(s *stats) error {
 	}
 
 	r.Close()
+
+	ru2 := syscall.Rusage{}
+	syscall.Getrusage(0, &ru2)
+	log.Debug("querylog: RSS:%d (diff:%d)", ru2.Maxrss, ru2.Maxrss-ru.Maxrss)
 
 	// After we've read the whole file, bolt might have used too much memory (via mmap())
 	l.dbReopen()
