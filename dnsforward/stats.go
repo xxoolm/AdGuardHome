@@ -9,7 +9,7 @@ import (
 )
 
 // how far back to keep the stats
-const statsHistoryElements = 60 + 1 // +1 for calculating delta
+const statsHistoryElements = 7*24 + 1 // +1 for calculating delta
 
 // entries for single time period (for example all per-second entries)
 type statsEntries map[string][statsHistoryElements]float64
@@ -347,7 +347,7 @@ func clamp(value, low, high int) int {
 // --------------------------
 func getReversedSlice(input [statsHistoryElements]float64, start int, end int) []float64 {
 	output := make([]float64, 0)
-	for i := start; i <= end; i++ {
+	for i := start; i < end; i++ {
 		output = append([]float64{input[i]}, output...)
 	}
 	return output
