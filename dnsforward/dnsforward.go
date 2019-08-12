@@ -349,6 +349,13 @@ func (s *Server) GetQueryLog() []map[string]interface{} {
 	return s.queryLog.getQueryLog()
 }
 
+// ClearQueryLog clears query log
+func (s *Server) ClearQueryLog() {
+	s.Lock()
+	s.queryLog.clearQueryLog()
+	s.Unlock()
+}
+
 // GetStatsTop returns the current stop stats
 func (s *Server) GetStatsTop() *StatsTop {
 	s.RLock()

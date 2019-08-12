@@ -19,6 +19,33 @@ var (
 
 const enableGzip = false
 
+// Clear memory buffer and remove the file
+func (l *queryLog) clearQueryLog() {
+	l.fileFlushLock.Lock()
+	defer l.fileFlushLock.Unlock()
+
+	l.logBufferLock.Lock()
+	l.logBuffer = nil
+	l.flushPending = false
+	l.logBufferLock.Unlock()
+
+	l.queryLogLock.Lock()
+	l.queryLogCache = nil
+	l.queryLogLock.Unlock()
+
+	err := os.Remove(l.logFile + ".1")
+	if err != nil {
+		log.Error("file remove: %s: %s", l.logFile+".1", err)
+	}
+
+	err = os.Remove(l.logFile)
+	if err != nil {
+		log.Error("file remove: %s: %s", l.logFile, err)
+	}
+
+	log.Debug("Query log: cleared")
+}
+
 // flushLogBuffer flushes the current buffer to file and resets the current buffer
 func (l *queryLog) flushLogBuffer(fullFlush bool) error {
 	l.fileFlushLock.Lock()
