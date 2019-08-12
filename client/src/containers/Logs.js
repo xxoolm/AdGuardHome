@@ -1,5 +1,14 @@
 import { connect } from 'react-redux';
-import { getLogs, toggleLogStatus, downloadQueryLog, getFilteringStatus, setRules, addSuccessToast, getClients } from '../actions';
+import {
+    getLogs,
+    toggleLogStatus,
+    downloadQueryLog,
+    getFilteringStatus,
+    setRules,
+    addSuccessToast,
+    getClients,
+    clearLogs,
+} from '../actions';
 import Logs from '../components/Logs';
 
 const mapStateToProps = (state) => {
@@ -16,6 +25,7 @@ const mapDispatchToProps = {
     setRules,
     addSuccessToast,
     getClients,
+    clearLogs,
 };
 
 export default connect(

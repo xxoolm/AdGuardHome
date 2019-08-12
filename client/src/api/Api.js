@@ -34,6 +34,7 @@ export default class Api {
     GLOBAL_QUERY_LOG = { path: 'querylog', method: 'GET' };
     GLOBAL_QUERY_LOG_ENABLE = { path: 'querylog_enable', method: 'POST' };
     GLOBAL_QUERY_LOG_DISABLE = { path: 'querylog_disable', method: 'POST' };
+    GLOBAL_QUERY_LOG_CLEAR = { path: 'querylog_clear', method: 'POST' };
     GLOBAL_SET_UPSTREAM_DNS = { path: 'set_upstreams_config', method: 'POST' };
     GLOBAL_TEST_UPSTREAM_DNS = { path: 'test_upstream_dns', method: 'POST' };
     GLOBAL_VERSION = { path: 'version.json', method: 'POST' };
@@ -104,6 +105,11 @@ export default class Api {
 
     disableQueryLog() {
         const { path, method } = this.GLOBAL_QUERY_LOG_DISABLE;
+        return this.makeRequest(path, method);
+    }
+
+    clearQueryLog() {
+        const { path, method } = this.GLOBAL_QUERY_LOG_CLEAR;
         return this.makeRequest(path, method);
     }
 

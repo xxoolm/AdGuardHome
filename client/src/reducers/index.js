@@ -230,7 +230,18 @@ const queryLogs = handleActions({
     [actions.downloadQueryLogRequest]: state => ({ ...state, logsDownloading: true }),
     [actions.downloadQueryLogFailure]: state => ({ ...state, logsDownloading: false }),
     [actions.downloadQueryLogSuccess]: state => ({ ...state, logsDownloading: false }),
-}, { getLogsProcessing: false, logsDownloading: false });
+
+    [actions.clearLogsRequest]: state => ({ ...state, processingClear: true }),
+    [actions.clearLogsFailure]: state => ({ ...state, processingClear: false }),
+    [actions.clearLogsSuccess]: state => ({
+        ...state, logs: [], processingClear: false,
+    }),
+}, {
+    getLogsProcessing: false,
+    logsDownloading: false,
+    processingClear: false,
+    logs: [],
+});
 
 const filtering = handleActions({
     [actions.setRulesRequest]: state => ({ ...state, processingRules: true }),

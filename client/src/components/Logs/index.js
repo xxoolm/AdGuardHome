@@ -10,6 +10,7 @@ import { HashLink as Link } from 'react-router-hash-link';
 import { formatTime, getClientName } from '../../helpers/helpers';
 import { SERVICES } from '../../helpers/constants';
 import { getTrackerData } from '../../helpers/trackers/trackers';
+import Controls from './Controls';
 import PageTitle from '../ui/PageTitle';
 import Card from '../ui/Card';
 import Loading from '../ui/Loading';
@@ -42,6 +43,13 @@ class Logs extends Component {
 
     renderTooltip = (isFiltered, rule, filter, service) =>
         isFiltered && <PopoverFiltered rule={rule} filter={filter} service={service} />;
+
+    clearLogs = () => {
+        // eslint-disable-next-line no-alert
+        if (window.confirm(this.props.t('query_log_confirm_clear'))) {
+            this.props.clearLogs();
+        }
+    }
 
     toggleBlocking = (type, domain) => {
         const { userRules } = this.props.filtering;
@@ -308,56 +316,28 @@ class Logs extends Component {
         return undefined;
     }
 
-    handleDownloadButton = async (e) => {
-        e.preventDefault();
+    handleDownloadButton = async () => {
         const data = await this.props.downloadQueryLog();
         const jsonStr = JSON.stringify(data);
         const dataBlob = new Blob([jsonStr], { type: 'text/plain;charset=utf-8' });
         saveAs(dataBlob, DOWNLOAD_LOG_FILENAME);
     };
 
-    renderButtons(queryLogEnabled, logStatusProcessing) {
-        if (queryLogEnabled) {
-            return (
-                <Fragment>
-                    <button
-                        className="btn btn-gray btn-sm mr-2"
-                        type="submit"
-                        onClick={() => this.props.toggleLogStatus(queryLogEnabled)}
-                        disabled={logStatusProcessing}
-                    ><Trans>disabled_log_btn</Trans></button>
-                    <button
-                        className="btn btn-primary btn-sm mr-2"
-                        type="submit"
-                        onClick={this.handleDownloadButton}
-                    ><Trans>download_log_file_btn</Trans></button>
-                    <button
-                        className="btn btn-outline-primary btn-sm"
-                        type="submit"
-                        onClick={this.getLogs}
-                    ><Trans>refresh_btn</Trans></button>
-                </Fragment>
-            );
-        }
-
-        return (
-            <button
-                className="btn btn-success btn-sm mr-2"
-                type="submit"
-                onClick={() => this.props.toggleLogStatus(queryLogEnabled)}
-                disabled={logStatusProcessing}
-            ><Trans>enabled_log_btn</Trans></button>
-        );
-    }
-
     render() {
         const { queryLogs, dashboard, t } = this.props;
         const { queryLogEnabled } = dashboard;
         return (
             <Fragment>
-                <PageTitle title={ t('query_log') } subtitle={ t('last_dns_queries') }>
+                <PageTitle title={t('query_log')} subtitle={t('last_dns_queries')}>
                     <div className="page-title__actions">
-                        {this.renderButtons(queryLogEnabled, dashboard.logStatusProcessing)}
+                        <Controls
+                            queryLogEnabled={queryLogEnabled}
+                            logStatusProcessing={dashboard.logStatusProcessing}
+                            toggleLogStatus={this.props.toggleLogStatus}
+                            handleDownloadButton={this.handleDownloadButton}
+                            getLogs={this.getLogs}
+                            clearLogs={this.clearLogs}
+                        />
                     </div>
                 </PageTitle>
                 <Card>
@@ -394,6 +374,7 @@ Logs.propTypes = {
     logStatusProcessing: PropTypes.bool,
     t: PropTypes.func,
     getClients: PropTypes.func.isRequired,
+    clearLogs: PropTypes.func.isRequired,
 };
 
 export default withNamespaces()(Logs);

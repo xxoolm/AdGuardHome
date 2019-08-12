@@ -356,6 +356,22 @@ export const getLogs = () => async (dispatch, getState) => {
     }, 100);
 };
 
+export const clearLogsRequest = createAction('CLEAR_LOGS_REQUEST');
+export const clearLogsFailure = createAction('CLEAR_LOGS_FAILURE');
+export const clearLogsSuccess = createAction('CLEAR_LOGS_SUCCESS');
+
+export const clearLogs = () => async (dispatch) => {
+    dispatch(clearLogsRequest());
+    try {
+        await apiClient.clearQueryLog();
+        dispatch(clearLogsSuccess());
+        dispatch(addSuccessToast('query_log_cleared'));
+    } catch (error) {
+        dispatch(addErrorToast({ error }));
+        dispatch(clearLogsFailure(error));
+    }
+};
+
 export const toggleLogStatusRequest = createAction('TOGGLE_LOGS_REQUEST');
 export const toggleLogStatusFailure = createAction('TOGGLE_LOGS_FAILURE');
 export const toggleLogStatusSuccess = createAction('TOGGLE_LOGS_SUCCESS');
