@@ -642,7 +642,7 @@ Response:
 	clients: [
 		{
 			name: "client1"
-			ip: "..."
+			ip_addrs: ["...", ...]
 			mac: "..."
 			use_global_settings: true
 			filtering_enabled: false
@@ -681,7 +681,7 @@ Request:
 
 	{
 		name: "client1"
-		ip: "..."
+		ip_addrs: ["...", ...]
 		mac: "..."
 		use_global_settings: true
 		filtering_enabled: false
@@ -711,7 +711,7 @@ Request:
 		name: "client1"
 		data: {
 			name: "client1"
-			ip: "..."
+			ip_addrs: ["...", ...]
 			mac: "..."
 			use_global_settings: true
 			filtering_enabled: false

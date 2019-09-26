@@ -30,14 +30,14 @@ type logSettings struct {
 }
 
 type clientObject struct {
-	Name                string `yaml:"name"`
-	IP                  string `yaml:"ip"`
-	MAC                 string `yaml:"mac"`
-	UseGlobalSettings   bool   `yaml:"use_global_settings"`
-	FilteringEnabled    bool   `yaml:"filtering_enabled"`
-	ParentalEnabled     bool   `yaml:"parental_enabled"`
-	SafeSearchEnabled   bool   `yaml:"safebrowsing_enabled"`
-	SafeBrowsingEnabled bool   `yaml:"safesearch_enabled"`
+	Name                string   `yaml:"name"`
+	IPs                 []string `yaml:"ip_addrs"`
+	MAC                 string   `yaml:"mac"`
+	UseGlobalSettings   bool     `yaml:"use_global_settings"`
+	FilteringEnabled    bool     `yaml:"filtering_enabled"`
+	ParentalEnabled     bool     `yaml:"parental_enabled"`
+	SafeSearchEnabled   bool     `yaml:"safebrowsing_enabled"`
+	SafeBrowsingEnabled bool     `yaml:"safesearch_enabled"`
 
 	UseGlobalBlockedServices bool     `yaml:"use_global_blocked_services"`
 	BlockedServices          []string `yaml:"blocked_services"`
@@ -280,7 +280,7 @@ func parseConfig() error {
 	for _, cy := range config.Clients {
 		cli := Client{
 			Name:                cy.Name,
-			IP:                  cy.IP,
+			IPs:                 cy.IPs,
 			MAC:                 cy.MAC,
 			UseOwnSettings:      !cy.UseGlobalSettings,
 			FilteringEnabled:    cy.FilteringEnabled,
@@ -329,13 +329,9 @@ func (c *configuration) write() error {
 
 	clientsList := config.clients.GetList()
 	for _, cli := range clientsList {
-		ip := cli.IP
-		if len(cli.MAC) != 0 {
-			ip = ""
-		}
 		cy := clientObject{
 			Name:                cli.Name,
-			IP:                  ip,
+			IPs:                 cli.IPs,
 			MAC:                 cli.MAC,
 			UseGlobalSettings:   !cli.UseOwnSettings,
 			FilteringEnabled:    cli.FilteringEnabled,

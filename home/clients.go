@@ -23,7 +23,7 @@ const (
 
 // Client information
 type Client struct {
-	IP                  string
+	IPs                 []string
 	MAC                 string
 	Name                string
 	UseOwnSettings      bool // false: use global settings
@@ -38,14 +38,14 @@ type Client struct {
 }
 
 type clientJSON struct {
-	IP                  string `json:"ip"`
-	MAC                 string `json:"mac"`
-	Name                string `json:"name"`
-	UseGlobalSettings   bool   `json:"use_global_settings"`
-	FilteringEnabled    bool   `json:"filtering_enabled"`
-	ParentalEnabled     bool   `json:"parental_enabled"`
-	SafeSearchEnabled   bool   `json:"safebrowsing_enabled"`
-	SafeBrowsingEnabled bool   `json:"safesearch_enabled"`
+	IPs                 []string `json:"ip_addrs"`
+	MAC                 string   `json:"mac"`
+	Name                string   `json:"name"`
+	UseGlobalSettings   bool     `json:"use_global_settings"`
+	FilteringEnabled    bool     `json:"filtering_enabled"`
+	ParentalEnabled     bool     `json:"parental_enabled"`
+	SafeSearchEnabled   bool     `json:"safebrowsing_enabled"`
+	SafeBrowsingEnabled bool     `json:"safesearch_enabled"`
 
 	WhoisInfo map[string]interface{} `json:"whois_info"`
 
@@ -161,17 +161,19 @@ func (c *Client) check() error {
 		return fmt.Errorf("Invalid Name")
 	}
 
-	if (len(c.IP) == 0 && len(c.MAC) == 0) ||
-		(len(c.IP) != 0 && len(c.MAC) != 0) {
+	if (len(c.IPs) == 0 && len(c.MAC) == 0) ||
+		(len(c.IPs) != 0 && len(c.MAC) != 0) {
 		return fmt.Errorf("IP or MAC required")
 	}
 
-	if len(c.IP) != 0 {
-		ip := net.ParseIP(c.IP)
-		if ip == nil {
-			return fmt.Errorf("Invalid IP")
+	if len(c.IPs) != 0 {
+		for i, ipStr := range c.IPs {
+			ip := net.ParseIP(ipStr)
+			if ip == nil {
+				return fmt.Errorf("Invalid IP")
+			}
+			c.IPs[i] = ip.String() // normalize IP address
 		}
-		c.IP = ip.String()
 	} else {
 		_, err := net.ParseMAC(c.MAC)
 		if err != nil {
@@ -199,25 +201,33 @@ func (clients *clientsContainer) Add(c Client) (bool, error) {
 	}
 
 	// check IP index
-	if len(c.IP) != 0 {
-		c2, ok := clients.ipIndex[c.IP]
+	for _, ip := range c.IPs {
+		c2, ok := clients.ipIndex[ip]
 		if ok {
 			return false, fmt.Errorf("Another client uses the same IP address: %s", c2.Name)
 		}
 	}
 
-	ch, ok := clients.ipHost[c.IP]
-	if ok {
-		c.WhoisInfo = ch.WhoisInfo
-		delete(clients.ipHost, c.IP)
+	// remove auto-clients with the same IP address, keeping WHOIS info if possible
+	for _, ip := range c.IPs {
+		ch, ok := clients.ipHost[ip]
+		if ok {
+			if len(c.WhoisInfo) == 0 {
+				c.WhoisInfo = ch.WhoisInfo
+			}
+			delete(clients.ipHost, ip)
+		}
 	}
 
+	// update Name index
 	clients.list[c.Name] = &c
-	if len(c.IP) != 0 {
-		clients.ipIndex[c.IP] = &c
+
+	// update IP index
+	for _, ip := range c.IPs {
+		clients.ipIndex[ip] = &c
 	}
 
-	log.Tracef("'%s': '%s' | '%s' -> [%d]", c.Name, c.IP, c.MAC, len(clients.list))
+	log.Tracef("'%s': %v | '%s' -> [%d]", c.Name, c.IPs, c.MAC, len(clients.list))
 	return true, nil
 }
 
@@ -231,8 +241,26 @@ func (clients *clientsContainer) Del(name string) bool {
 		return false
 	}
 
+	// update Name index
 	delete(clients.list, name)
-	delete(clients.ipIndex, c.IP)
+
+	// update IP index
+	for _, ip := range c.IPs {
+		delete(clients.ipIndex, ip)
+	}
+	return true
+}
+
+// Return TRUE if arrays are equal
+func arraysEqual(a, b []string) bool {
+	if len(a) != len(b) {
+		return false
+	}
+	for i := 0; i != len(a); i++ {
+		if a[i] != b[i] {
+			return false
+		}
+	}
 	return true
 }
 
@@ -260,10 +288,20 @@ func (clients *clientsContainer) Update(name string, c Client) error {
 	}
 
 	// check IP index
-	if old.IP != c.IP && len(c.IP) != 0 {
-		c2, ok := clients.ipIndex[c.IP]
-		if ok {
-			return fmt.Errorf("Another client uses the same IP address: %s", c2.Name)
+	if !arraysEqual(old.IPs, c.IPs) {
+		for _, ip := range c.IPs {
+			c2, ok := clients.ipIndex[ip]
+			if ok && c2 != old {
+				return fmt.Errorf("Another client uses the same IP address: %s", c2.Name)
+			}
+		}
+
+		// update IP index
+		for _, ip := range old.IPs {
+			delete(clients.ipIndex, ip)
+		}
+		for _, ip := range c.IPs {
+			clients.ipIndex[ip] = &c
 		}
 	}
 
@@ -272,14 +310,6 @@ func (clients *clientsContainer) Update(name string, c Client) error {
 		delete(clients.list, old.Name)
 	}
 	clients.list[c.Name] = &c
-
-	// update IP index
-	if old.IP != c.IP {
-		delete(clients.ipIndex, old.IP)
-	}
-	if len(c.IP) != 0 {
-		clients.ipIndex[c.IP] = &c
-	}
 
 	return nil
 }
@@ -454,7 +484,7 @@ func handleGetClients(w http.ResponseWriter, r *http.Request) {
 	config.clients.lock.Lock()
 	for _, c := range config.clients.list {
 		cj := clientJSON{
-			IP:                  c.IP,
+			IPs:                 c.IPs,
 			MAC:                 c.MAC,
 			Name:                c.Name,
 			UseGlobalSettings:   !c.UseOwnSettings,
@@ -471,7 +501,7 @@ func handleGetClients(w http.ResponseWriter, r *http.Request) {
 			hwAddr, _ := net.ParseMAC(c.MAC)
 			ipAddr := config.dhcpServer.FindIPbyMAC(hwAddr)
 			if ipAddr != nil {
-				cj.IP = ipAddr.String()
+				cj.IPs = append(cj.IPs, ipAddr.String())
 			}
 		}
 
@@ -520,7 +550,7 @@ func handleGetClients(w http.ResponseWriter, r *http.Request) {
 // Convert JSON object to Client object
 func jsonToClient(cj clientJSON) (*Client, error) {
 	c := Client{
-		IP:                  cj.IP,
+		IPs:                 cj.IPs,
 		MAC:                 cj.MAC,
 		Name:                cj.Name,
 		UseOwnSettings:      !cj.UseGlobalSettings,
