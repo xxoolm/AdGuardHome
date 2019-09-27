@@ -643,7 +643,7 @@ Response:
 		{
 			name: "client1"
 			ip_addrs: ["...", ...]
-			mac: "..."
+			mac_addrs: ["...", ...]
 			use_global_settings: true
 			filtering_enabled: false
 			parental_enabled: false
@@ -682,7 +682,7 @@ Request:
 	{
 		name: "client1"
 		ip_addrs: ["...", ...]
-		mac: "..."
+		mac_addrs: ["...", ...]
 		use_global_settings: true
 		filtering_enabled: false
 		parental_enabled: false
@@ -712,7 +712,7 @@ Request:
 		data: {
 			name: "client1"
 			ip_addrs: ["...", ...]
-			mac: "..."
+			mac_addrs: ["...", ...]
 			use_global_settings: true
 			filtering_enabled: false
 			parental_enabled: false

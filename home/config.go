@@ -32,7 +32,7 @@ type logSettings struct {
 type clientObject struct {
 	Name                string   `yaml:"name"`
 	IPs                 []string `yaml:"ip_addrs"`
-	MAC                 string   `yaml:"mac"`
+	MACs                []string `yaml:"mac_addrs"`
 	UseGlobalSettings   bool     `yaml:"use_global_settings"`
 	FilteringEnabled    bool     `yaml:"filtering_enabled"`
 	ParentalEnabled     bool     `yaml:"parental_enabled"`
@@ -281,7 +281,7 @@ func parseConfig() error {
 		cli := Client{
 			Name:                cy.Name,
 			IPs:                 cy.IPs,
-			MAC:                 cy.MAC,
+			MACs:                cy.MACs,
 			UseOwnSettings:      !cy.UseGlobalSettings,
 			FilteringEnabled:    cy.FilteringEnabled,
 			ParentalEnabled:     cy.ParentalEnabled,
@@ -332,7 +332,7 @@ func (c *configuration) write() error {
 		cy := clientObject{
 			Name:                cli.Name,
 			IPs:                 cli.IPs,
-			MAC:                 cli.MAC,
+			MACs:                cli.MACs,
 			UseGlobalSettings:   !cli.UseOwnSettings,
 			FilteringEnabled:    cli.FilteringEnabled,
 			ParentalEnabled:     cli.ParentalEnabled,

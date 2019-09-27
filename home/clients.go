@@ -24,7 +24,7 @@ const (
 // Client information
 type Client struct {
 	IPs                 []string
-	MAC                 string
+	MACs                []string
 	Name                string
 	UseOwnSettings      bool // false: use global settings
 	FilteringEnabled    bool
@@ -39,7 +39,7 @@ type Client struct {
 
 type clientJSON struct {
 	IPs                 []string `json:"ip_addrs"`
-	MAC                 string   `json:"mac"`
+	MACs                []string `json:"mac_addrs"`
 	Name                string   `json:"name"`
 	UseGlobalSettings   bool     `json:"use_global_settings"`
 	FilteringEnabled    bool     `json:"filtering_enabled"`
@@ -137,12 +137,12 @@ func (clients *clientsContainer) Find(ip string) (Client, bool) {
 	}
 
 	for _, c = range clients.list {
-		if len(c.MAC) != 0 {
-			mac, err := net.ParseMAC(c.MAC)
+		for _, mac := range c.MACs {
+			hwAddr, err := net.ParseMAC(mac)
 			if err != nil {
 				continue
 			}
-			ipAddr := config.dhcpServer.FindIPbyMAC(mac)
+			ipAddr := config.dhcpServer.FindIPbyMAC(hwAddr)
 			if ipAddr == nil {
 				continue
 			}
@@ -161,8 +161,8 @@ func (c *Client) check() error {
 		return fmt.Errorf("Invalid Name")
 	}
 
-	if (len(c.IPs) == 0 && len(c.MAC) == 0) ||
-		(len(c.IPs) != 0 && len(c.MAC) != 0) {
+	if (len(c.IPs) == 0 && len(c.MACs) == 0) ||
+		(len(c.IPs) != 0 && len(c.MACs) != 0) {
 		return fmt.Errorf("IP or MAC required")
 	}
 
@@ -175,9 +175,11 @@ func (c *Client) check() error {
 			c.IPs[i] = ip.String() // normalize IP address
 		}
 	} else {
-		_, err := net.ParseMAC(c.MAC)
-		if err != nil {
-			return fmt.Errorf("Invalid MAC: %s", err)
+		for _, mac := range c.MACs {
+			_, err := net.ParseMAC(mac)
+			if err != nil {
+				return fmt.Errorf("Invalid MAC: %s", err)
+			}
 		}
 	}
 	return nil
@@ -227,7 +229,7 @@ func (clients *clientsContainer) Add(c Client) (bool, error) {
 		clients.ipIndex[ip] = &c
 	}
 
-	log.Tracef("'%s': %v | '%s' -> [%d]", c.Name, c.IPs, c.MAC, len(clients.list))
+	log.Tracef("'%s': %v | '%v' -> [%d]", c.Name, c.IPs, c.MACs, len(clients.list))
 	return true, nil
 }
 
@@ -485,7 +487,7 @@ func handleGetClients(w http.ResponseWriter, r *http.Request) {
 	for _, c := range config.clients.list {
 		cj := clientJSON{
 			IPs:                 c.IPs,
-			MAC:                 c.MAC,
+			MACs:                c.MACs,
 			Name:                c.Name,
 			UseGlobalSettings:   !c.UseOwnSettings,
 			FilteringEnabled:    c.FilteringEnabled,
@@ -497,8 +499,8 @@ func handleGetClients(w http.ResponseWriter, r *http.Request) {
 			BlockedServices:          c.BlockedServices,
 		}
 
-		if len(c.MAC) != 0 {
-			hwAddr, _ := net.ParseMAC(c.MAC)
+		for _, mac := range c.MACs {
+			hwAddr, _ := net.ParseMAC(mac)
 			ipAddr := config.dhcpServer.FindIPbyMAC(hwAddr)
 			if ipAddr != nil {
 				cj.IPs = append(cj.IPs, ipAddr.String())
@@ -551,7 +553,7 @@ func handleGetClients(w http.ResponseWriter, r *http.Request) {
 func jsonToClient(cj clientJSON) (*Client, error) {
 	c := Client{
 		IPs:                 cj.IPs,
-		MAC:                 cj.MAC,
+		MACs:                cj.MACs,
 		Name:                cj.Name,
 		UseOwnSettings:      !cj.UseGlobalSettings,
 		FilteringEnabled:    cj.FilteringEnabled,

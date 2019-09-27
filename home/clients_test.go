@@ -16,7 +16,7 @@ func TestClients(t *testing.T) {
 
 	// add
 	c = Client{
-		IP:   "1.1.1.1",
+		IPs:  []string{"1.1.1.1"},
 		Name: "client1",
 	}
 	b, e = clients.Add(c)
@@ -26,7 +26,7 @@ func TestClients(t *testing.T) {
 
 	// add #2
 	c = Client{
-		IP:   "2.2.2.2",
+		IPs:  []string{"2.2.2.2"},
 		Name: "client2",
 	}
 	b, e = clients.Add(c)
@@ -46,7 +46,7 @@ func TestClients(t *testing.T) {
 
 	// failed add - name in use
 	c = Client{
-		IP:   "1.2.3.5",
+		IPs:  []string{"1.2.3.5"},
 		Name: "client1",
 	}
 	b, _ = clients.Add(c)
@@ -56,7 +56,7 @@ func TestClients(t *testing.T) {
 
 	// failed add - ip in use
 	c = Client{
-		IP:   "2.2.2.2",
+		IPs:  []string{"2.2.2.2"},
 		Name: "client3",
 	}
 	b, e = clients.Add(c)
@@ -70,28 +70,28 @@ func TestClients(t *testing.T) {
 	assert.True(t, clients.Exists("2.2.2.2", ClientSourceHostsFile))
 
 	// failed update - no such name
-	c.IP = "1.2.3.0"
+	c.IPs = []string{"1.2.3.0"}
 	c.Name = "client3"
 	if clients.Update("client3", c) == nil {
 		t.Fatalf("Update")
 	}
 
 	// failed update - name in use
-	c.IP = "1.2.3.0"
+	c.IPs = []string{"1.2.3.0"}
 	c.Name = "client2"
 	if clients.Update("client1", c) == nil {
 		t.Fatalf("Update - name in use")
 	}
 
 	// failed update - ip in use
-	c.IP = "2.2.2.2"
+	c.IPs = []string{"2.2.2.2"}
 	c.Name = "client1"
 	if clients.Update("client1", c) == nil {
 		t.Fatalf("Update - ip in use")
 	}
 
 	// update
-	c.IP = "1.1.1.2"
+	c.IPs = []string{"1.1.1.2"}
 	c.Name = "client1"
 	if clients.Update("client1", c) != nil {
 		t.Fatalf("Update")
