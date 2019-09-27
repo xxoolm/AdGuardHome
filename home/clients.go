@@ -229,7 +229,7 @@ func (clients *clientsContainer) Add(c Client) (bool, error) {
 		clients.ipIndex[ip] = &c
 	}
 
-	log.Tracef("'%s': %v | '%v' -> [%d]", c.Name, c.IPs, c.MACs, len(clients.list))
+	log.Tracef("'%s': IP:%v, MAC:%v [%d]", c.Name, c.IPs, c.MACs, len(clients.list))
 	return true, nil
 }
 
