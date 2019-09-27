@@ -278,6 +278,7 @@ func upgradeSchema4to5(diskConfig *map[string]interface{}) error {
 // clients:
 // ...
 //   ip: 127.0.0.1
+//   mac: ...
 //
 // ->
 //
@@ -285,6 +286,8 @@ func upgradeSchema4to5(diskConfig *map[string]interface{}) error {
 // ...
 //   ip_addrs:
 //   - 127.0.0.1
+//   mac_addrs:
+//   - ...
 func upgradeSchema5to6(diskConfig *map[string]interface{}) error {
 	log.Printf("%s(): called", _Func())
 
@@ -304,17 +307,29 @@ func upgradeSchema5to6(diskConfig *map[string]interface{}) error {
 
 			case map[interface{}]interface{}:
 				_ip, ok := c["ip"]
-				if !ok {
-					continue
+				if ok {
+					ip, ok := _ip.(string)
+					if !ok {
+						log.Fatalf("client.ip is not a string: %v", _ip)
+						return nil
+					}
+					if len(ip) != 0 {
+						ipAddrs := []string{ip}
+						c["ip_addrs"] = ipAddrs
+					}
 				}
-				ip, ok := _ip.(string)
-				if !ok {
-					log.Fatalf("client.IP is not a string: %v", _ip)
-					return nil
-				}
-				if len(ip) != 0 {
-					ipAddrs := []string{ip}
-					c["ip_addrs"] = ipAddrs
+
+				_mac, ok := c["mac"]
+				if ok {
+					mac, ok := _mac.(string)
+					if !ok {
+						log.Fatalf("client.mac is not a string: %v", _mac)
+						return nil
+					}
+					if len(mac) != 0 {
+						macAddrs := []string{mac}
+						c["mac_addrs"] = macAddrs
+					}
 				}
 
 			default:
