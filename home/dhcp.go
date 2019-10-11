@@ -436,6 +436,7 @@ func startDHCPServer() error {
 	if err != nil {
 		return errorx.Decorate(err, "Couldn't start DHCP server")
 	}
+	config.clients.DHCPServerStarted()
 	return nil
 }
 

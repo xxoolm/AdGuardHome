@@ -1,11 +1,9 @@
 package home
 
 import (
-	"encoding/json"
 	"fmt"
 	"io/ioutil"
 	"net"
-	"net/http"
 	"os"
 	"os/exec"
 	"runtime"
@@ -13,6 +11,7 @@ import (
 	"sync"
 	"time"
 
+	"github.com/AdguardTeam/AdGuardHome/dhcpd"
 	"github.com/AdguardTeam/golibs/log"
 	"github.com/AdguardTeam/golibs/utils"
 )
@@ -35,22 +34,6 @@ type Client struct {
 
 	UseOwnBlockedServices bool // false: use global settings
 	BlockedServices       []string
-}
-
-type clientJSON struct {
-	IP                  string `json:"ip"`
-	MAC                 string `json:"mac"`
-	Name                string `json:"name"`
-	UseGlobalSettings   bool   `json:"use_global_settings"`
-	FilteringEnabled    bool   `json:"filtering_enabled"`
-	ParentalEnabled     bool   `json:"parental_enabled"`
-	SafeSearchEnabled   bool   `json:"safebrowsing_enabled"`
-	SafeBrowsingEnabled bool   `json:"safesearch_enabled"`
-
-	WhoisInfo map[string]interface{} `json:"whois_info"`
-
-	UseGlobalBlockedServices bool     `json:"use_global_blocked_services"`
-	BlockedServices          []string `json:"blocked_services"`
 }
 
 type clientSource uint
@@ -77,19 +60,89 @@ type clientsContainer struct {
 	ipIndex map[string]*Client     // IP -> client
 	ipHost  map[string]*ClientHost // IP -> Hostname
 	lock    sync.Mutex
+
+	dhcpServer *dhcpd.Server
 }
 
 // Init initializes clients container
 // Note: this function must be called only once
-func (clients *clientsContainer) Init() {
+func (clients *clientsContainer) Init(objects []clientObject, dhcpServer *dhcpd.Server) {
 	if clients.list != nil {
 		log.Fatal("clients.list != nil")
 	}
 	clients.list = make(map[string]*Client)
 	clients.ipIndex = make(map[string]*Client)
 	clients.ipHost = make(map[string]*ClientHost)
+	clients.dhcpServer = dhcpServer
+	clients.addFromConfig(objects)
 
 	go clients.periodicUpdate()
+}
+
+type clientObject struct {
+	Name                string `yaml:"name"`
+	IP                  string `yaml:"ip"`
+	MAC                 string `yaml:"mac"`
+	UseGlobalSettings   bool   `yaml:"use_global_settings"`
+	FilteringEnabled    bool   `yaml:"filtering_enabled"`
+	ParentalEnabled     bool   `yaml:"parental_enabled"`
+	SafeSearchEnabled   bool   `yaml:"safebrowsing_enabled"`
+	SafeBrowsingEnabled bool   `yaml:"safesearch_enabled"`
+
+	UseGlobalBlockedServices bool     `yaml:"use_global_blocked_services"`
+	BlockedServices          []string `yaml:"blocked_services"`
+}
+
+func (clients *clientsContainer) addFromConfig(objects []clientObject) {
+	for _, c := range objects {
+		cli := Client{
+			Name:                c.Name,
+			IP:                  c.IP,
+			MAC:                 c.MAC,
+			UseOwnSettings:      !c.UseGlobalSettings,
+			FilteringEnabled:    c.FilteringEnabled,
+			ParentalEnabled:     c.ParentalEnabled,
+			SafeSearchEnabled:   c.SafeSearchEnabled,
+			SafeBrowsingEnabled: c.SafeBrowsingEnabled,
+
+			UseOwnBlockedServices: !c.UseGlobalBlockedServices,
+			BlockedServices:       c.BlockedServices,
+		}
+		_, err := config.clients.Add(cli)
+		if err != nil {
+			log.Tracef("Clients: add: %s", err)
+		}
+	}
+}
+
+// WriteDiskConfig - write configuration
+func (clients *clientsContainer) WriteDiskConfig(objects *[]clientObject) {
+	clientsList := config.clients.GetList()
+	for _, cli := range clientsList {
+		ip := cli.IP
+		if len(cli.MAC) != 0 {
+			ip = ""
+		}
+		cy := clientObject{
+			Name:                cli.Name,
+			IP:                  ip,
+			MAC:                 cli.MAC,
+			UseGlobalSettings:   !cli.UseOwnSettings,
+			FilteringEnabled:    cli.FilteringEnabled,
+			ParentalEnabled:     cli.ParentalEnabled,
+			SafeSearchEnabled:   cli.SafeSearchEnabled,
+			SafeBrowsingEnabled: cli.SafeBrowsingEnabled,
+
+			UseGlobalBlockedServices: !cli.UseOwnBlockedServices,
+			BlockedServices:          cli.BlockedServices,
+		}
+		config.Clients = append(config.Clients, cy)
+	}
+}
+
+// DHCPServerStarted - called when DHCP server is started
+func (clients *clientsContainer) DHCPServerStarted() {
+	clients.addFromDHCP()
 }
 
 func (clients *clientsContainer) periodicUpdate() {
@@ -137,12 +190,12 @@ func (clients *clientsContainer) Find(ip string) (Client, bool) {
 	}
 
 	for _, c = range clients.list {
-		if len(c.MAC) != 0 {
+		if len(c.MAC) != 0 && clients.dhcpServer != nil {
 			mac, err := net.ParseMAC(c.MAC)
 			if err != nil {
 				continue
 			}
-			ipAddr := config.dhcpServer.FindIPbyMAC(mac)
+			ipAddr := clients.dhcpServer.FindIPbyMAC(mac)
 			if ipAddr == nil {
 				continue
 			}
@@ -427,218 +480,14 @@ func (clients *clientsContainer) addFromSystemARP() {
 
 // add clients from DHCP that have non-empty Hostname property
 func (clients *clientsContainer) addFromDHCP() {
-	leases := config.dhcpServer.Leases()
+	if clients.dhcpServer == nil {
+		return
+	}
+	leases := clients.dhcpServer.Leases()
 	for _, l := range leases {
 		if len(l.Hostname) == 0 {
 			continue
 		}
 		_, _ = config.clients.AddHost(l.IP.String(), l.Hostname, ClientSourceDHCP)
 	}
-}
-
-type clientHostJSON struct {
-	IP     string `json:"ip"`
-	Name   string `json:"name"`
-	Source string `json:"source"`
-
-	WhoisInfo map[string]interface{} `json:"whois_info"`
-}
-
-type clientListJSON struct {
-	Clients     []clientJSON     `json:"clients"`
-	AutoClients []clientHostJSON `json:"auto_clients"`
-}
-
-// respond with information about configured clients
-func handleGetClients(w http.ResponseWriter, r *http.Request) {
-	data := clientListJSON{}
-
-	config.clients.lock.Lock()
-	for _, c := range config.clients.list {
-		cj := clientJSON{
-			IP:                  c.IP,
-			MAC:                 c.MAC,
-			Name:                c.Name,
-			UseGlobalSettings:   !c.UseOwnSettings,
-			FilteringEnabled:    c.FilteringEnabled,
-			ParentalEnabled:     c.ParentalEnabled,
-			SafeSearchEnabled:   c.SafeSearchEnabled,
-			SafeBrowsingEnabled: c.SafeBrowsingEnabled,
-
-			UseGlobalBlockedServices: !c.UseOwnBlockedServices,
-			BlockedServices:          c.BlockedServices,
-		}
-
-		if len(c.MAC) != 0 {
-			hwAddr, _ := net.ParseMAC(c.MAC)
-			ipAddr := config.dhcpServer.FindIPbyMAC(hwAddr)
-			if ipAddr != nil {
-				cj.IP = ipAddr.String()
-			}
-		}
-
-		cj.WhoisInfo = make(map[string]interface{})
-		for _, wi := range c.WhoisInfo {
-			cj.WhoisInfo[wi[0]] = wi[1]
-		}
-
-		data.Clients = append(data.Clients, cj)
-	}
-	for ip, ch := range config.clients.ipHost {
-		cj := clientHostJSON{
-			IP:   ip,
-			Name: ch.Host,
-		}
-
-		cj.Source = "etc/hosts"
-		switch ch.Source {
-		case ClientSourceDHCP:
-			cj.Source = "DHCP"
-		case ClientSourceRDNS:
-			cj.Source = "rDNS"
-		case ClientSourceARP:
-			cj.Source = "ARP"
-		case ClientSourceWHOIS:
-			cj.Source = "WHOIS"
-		}
-
-		cj.WhoisInfo = make(map[string]interface{})
-		for _, wi := range ch.WhoisInfo {
-			cj.WhoisInfo[wi[0]] = wi[1]
-		}
-
-		data.AutoClients = append(data.AutoClients, cj)
-	}
-	config.clients.lock.Unlock()
-
-	w.Header().Set("Content-Type", "application/json")
-	e := json.NewEncoder(w).Encode(data)
-	if e != nil {
-		httpError(w, http.StatusInternalServerError, "Failed to encode to json: %v", e)
-		return
-	}
-}
-
-// Convert JSON object to Client object
-func jsonToClient(cj clientJSON) (*Client, error) {
-	c := Client{
-		IP:                  cj.IP,
-		MAC:                 cj.MAC,
-		Name:                cj.Name,
-		UseOwnSettings:      !cj.UseGlobalSettings,
-		FilteringEnabled:    cj.FilteringEnabled,
-		ParentalEnabled:     cj.ParentalEnabled,
-		SafeSearchEnabled:   cj.SafeSearchEnabled,
-		SafeBrowsingEnabled: cj.SafeBrowsingEnabled,
-
-		UseOwnBlockedServices: !cj.UseGlobalBlockedServices,
-		BlockedServices:       cj.BlockedServices,
-	}
-	return &c, nil
-}
-
-// Add a new client
-func handleAddClient(w http.ResponseWriter, r *http.Request) {
-	body, err := ioutil.ReadAll(r.Body)
-	if err != nil {
-		httpError(w, http.StatusBadRequest, "failed to read request body: %s", err)
-		return
-	}
-
-	cj := clientJSON{}
-	err = json.Unmarshal(body, &cj)
-	if err != nil {
-		httpError(w, http.StatusBadRequest, "JSON parse: %s", err)
-		return
-	}
-
-	c, err := jsonToClient(cj)
-	if err != nil {
-		httpError(w, http.StatusBadRequest, "%s", err)
-		return
-	}
-	ok, err := config.clients.Add(*c)
-	if err != nil {
-		httpError(w, http.StatusBadRequest, "%s", err)
-		return
-	}
-	if !ok {
-		httpError(w, http.StatusBadRequest, "Client already exists")
-		return
-	}
-
-	_ = writeAllConfigsAndReloadDNS()
-	returnOK(w)
-}
-
-// Remove client
-func handleDelClient(w http.ResponseWriter, r *http.Request) {
-	body, err := ioutil.ReadAll(r.Body)
-	if err != nil {
-		httpError(w, http.StatusBadRequest, "failed to read request body: %s", err)
-		return
-	}
-
-	cj := clientJSON{}
-	err = json.Unmarshal(body, &cj)
-	if err != nil || len(cj.Name) == 0 {
-		httpError(w, http.StatusBadRequest, "JSON parse: %s", err)
-		return
-	}
-
-	if !config.clients.Del(cj.Name) {
-		httpError(w, http.StatusBadRequest, "Client not found")
-		return
-	}
-
-	_ = writeAllConfigsAndReloadDNS()
-	returnOK(w)
-}
-
-type updateJSON struct {
-	Name string     `json:"name"`
-	Data clientJSON `json:"data"`
-}
-
-// Update client's properties
-func handleUpdateClient(w http.ResponseWriter, r *http.Request) {
-	body, err := ioutil.ReadAll(r.Body)
-	if err != nil {
-		httpError(w, http.StatusBadRequest, "failed to read request body: %s", err)
-		return
-	}
-
-	var dj updateJSON
-	err = json.Unmarshal(body, &dj)
-	if err != nil {
-		httpError(w, http.StatusBadRequest, "JSON parse: %s", err)
-		return
-	}
-	if len(dj.Name) == 0 {
-		httpError(w, http.StatusBadRequest, "Invalid request")
-		return
-	}
-
-	c, err := jsonToClient(dj.Data)
-	if err != nil {
-		httpError(w, http.StatusBadRequest, "%s", err)
-		return
-	}
-
-	err = config.clients.Update(dj.Name, *c)
-	if err != nil {
-		httpError(w, http.StatusBadRequest, "%s", err)
-		return
-	}
-
-	_ = writeAllConfigsAndReloadDNS()
-	returnOK(w)
-}
-
-// RegisterClientsHandlers registers HTTP handlers
-func RegisterClientsHandlers() {
-	httpRegister(http.MethodGet, "/control/clients", handleGetClients)
-	httpRegister(http.MethodPost, "/control/clients/add", handleAddClient)
-	httpRegister(http.MethodPost, "/control/clients/delete", handleDelClient)
-	httpRegister(http.MethodPost, "/control/clients/update", handleUpdateClient)
 }

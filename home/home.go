@@ -20,6 +20,7 @@ import (
 	"syscall"
 	"time"
 
+	"github.com/AdguardTeam/AdGuardHome/dhcpd"
 	"github.com/AdguardTeam/golibs/log"
 	"github.com/NYTimes/gziphandler"
 	"github.com/gobuffalo/packr"
@@ -101,7 +102,6 @@ func run(args options) {
 	}()
 
 	initConfig()
-	config.clients.Init()
 	initServices()
 
 	if !config.firstRun {
@@ -121,6 +121,10 @@ func run(args options) {
 			os.Exit(0)
 		}
 	}
+
+	config.dhcpServer = dhcpd.Create(config.DHCP)
+	config.clients.Init(config.Clients, config.dhcpServer)
+	config.Clients = nil
 
 	if (runtime.GOOS == "linux" || runtime.GOOS == "darwin") &&
 		config.RlimitNoFile != 0 {
