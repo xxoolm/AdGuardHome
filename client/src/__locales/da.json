@@ -141,6 +141,7 @@
     "example_comment": "! Her er en kommentar",
     "example_comment_meaning": "bare en kommentar",
     "example_comment_hash": "# Også en kommentar",
+    "example_regex_meaning": "bloker adgangen til de domæner, der matcher det angivne regulære udtryk",
     "example_upstream_regular": "almindelig DNS (over UDP)",
     "example_upstream_dot": "krypteret <0>DNS-over-TLS</0>",
     "example_upstream_doh": "krypteret <0>DNS-over-HTTPS</0>",

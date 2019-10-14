@@ -141,6 +141,7 @@
     "example_comment": "! 看，一個註解",
     "example_comment_meaning": "只是一個註解",
     "example_comment_hash": "# 也是一個註解",
+    "example_regex_meaning": "封鎖至與已明確指定的規則運算式（Regular Expression）相符的網域之存取",
     "example_upstream_regular": "一般的 DNS（透過 UDP）",
     "example_upstream_dot": "加密的 <0>DNS-over-TLS</0>",
     "example_upstream_doh": "加密的 <0>DNS-over-HTTPS</0>",
