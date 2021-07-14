@@ -3,16 +3,15 @@ package home
 import (
 	"context"
 	"crypto/tls"
+	"io/fs"
 	"net"
 	"net/http"
-	"strconv"
 	"sync"
 	"time"
 
 	"github.com/AdguardTeam/AdGuardHome/internal/aghnet"
 	"github.com/AdguardTeam/golibs/log"
 	"github.com/NYTimes/gziphandler"
-	"github.com/gobuffalo/packr"
 )
 
 // HTTP scheme constants.
@@ -33,11 +32,14 @@ const (
 )
 
 type webConfig struct {
-	firstRun     bool
 	BindHost     net.IP
 	BindPort     int
 	BetaBindPort int
 	PortHTTPS    int
+	firstRun     bool
+
+	clientFS     fs.FS
+	clientBetaFS fs.FS
 
 	// ReadTimeout is an option to pass to http.Server for setting an
 	// appropriate field.
@@ -85,19 +87,18 @@ func CreateWeb(conf *webConfig) *Web {
 	w := Web{}
 	w.conf = conf
 
-	// Initialize and run the admin Web interface
-	box := packr.NewBox("../../build/static")
-	boxBeta := packr.NewBox("../../build2/static")
+	clientFS := http.FileServer(http.FS(conf.clientFS))
+	betaClientFS := http.FileServer(http.FS(conf.clientBetaFS))
 
 	// if not configured, redirect / to /install.html, otherwise redirect /install.html to /
-	Context.mux.Handle("/", withMiddlewares(http.FileServer(box), gziphandler.GzipHandler, optionalAuthHandler, postInstallHandler))
-	w.handlerBeta = withMiddlewares(http.FileServer(boxBeta), gziphandler.GzipHandler, optionalAuthHandler, postInstallHandler)
+	Context.mux.Handle("/", withMiddlewares(clientFS, gziphandler.GzipHandler, optionalAuthHandler, postInstallHandler))
+	w.handlerBeta = withMiddlewares(betaClientFS, gziphandler.GzipHandler, optionalAuthHandler, postInstallHandler)
 
 	// add handlers for /install paths, we only need them when we're not configured yet
 	if conf.firstRun {
 		log.Info("This is the first launch of AdGuard Home, redirecting everything to /install.html ")
-		Context.mux.Handle("/install.html", preInstallHandler(http.FileServer(box)))
-		w.installerBeta = preInstallHandler(http.FileServer(boxBeta))
+		Context.mux.Handle("/install.html", preInstallHandler(clientFS))
+		w.installerBeta = preInstallHandler(betaClientFS)
 		w.registerInstallHandlers()
 		// This must be removed in API v1.
 		w.registerBetaInstallHandlers()
@@ -160,6 +161,8 @@ func (web *Web) TLSConfigChanged(ctx context.Context, tlsConf tlsConfigSettings)
 
 // Start - start serving HTTP requests
 func (web *Web) Start() {
+	log.Println("AdGuard Home is available at the following addresses:")
+
 	// for https, we have a separate goroutine loop
 	go web.tlsServerLoop()
 
@@ -172,7 +175,7 @@ func (web *Web) Start() {
 		// we need to have new instance, because after Shutdown() the Server is not usable
 		web.httpServer = &http.Server{
 			ErrorLog:          log.StdLog("web: plain", log.DEBUG),
-			Addr:              net.JoinHostPort(hostStr, strconv.Itoa(web.conf.BindPort)),
+			Addr:              aghnet.JoinHostPort(hostStr, web.conf.BindPort),
 			Handler:           withMiddlewares(Context.mux, limitRequestBody),
 			ReadTimeout:       web.conf.ReadTimeout,
 			ReadHeaderTimeout: web.conf.ReadHeaderTimeout,
@@ -185,7 +188,7 @@ func (web *Web) Start() {
 		if web.conf.BetaBindPort != 0 {
 			web.httpServerBeta = &http.Server{
 				ErrorLog:          log.StdLog("web: plain", log.DEBUG),
-				Addr:              net.JoinHostPort(hostStr, strconv.Itoa(web.conf.BetaBindPort)),
+				Addr:              aghnet.JoinHostPort(hostStr, web.conf.BetaBindPort),
 				Handler:           withMiddlewares(Context.mux, limitRequestBody, web.wrapIndexBeta),
 				ReadTimeout:       web.conf.ReadTimeout,
 				ReadHeaderTimeout: web.conf.ReadHeaderTimeout,
@@ -246,7 +249,7 @@ func (web *Web) tlsServerLoop() {
 		web.httpsServer.cond.L.Unlock()
 
 		// prepare HTTPS server
-		address := net.JoinHostPort(web.conf.BindHost.String(), strconv.Itoa(web.conf.PortHTTPS))
+		address := aghnet.JoinHostPort(web.conf.BindHost.String(), web.conf.PortHTTPS)
 		web.httpsServer.server = &http.Server{
 			ErrorLog: log.StdLog("web: https", log.DEBUG),
 			Addr:     address,

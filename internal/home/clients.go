@@ -11,15 +11,15 @@ import (
 	"sync"
 	"time"
 
-	"github.com/AdguardTeam/AdGuardHome/internal/agherr"
 	"github.com/AdguardTeam/AdGuardHome/internal/aghnet"
 	"github.com/AdguardTeam/AdGuardHome/internal/aghstrings"
 	"github.com/AdguardTeam/AdGuardHome/internal/dhcpd"
-	"github.com/AdguardTeam/AdGuardHome/internal/dnsfilter"
 	"github.com/AdguardTeam/AdGuardHome/internal/dnsforward"
+	"github.com/AdguardTeam/AdGuardHome/internal/filtering"
 	"github.com/AdguardTeam/AdGuardHome/internal/querylog"
 	"github.com/AdguardTeam/dnsproxy/proxy"
 	"github.com/AdguardTeam/dnsproxy/upstream"
+	"github.com/AdguardTeam/golibs/errors"
 	"github.com/AdguardTeam/golibs/log"
 )
 
@@ -29,25 +29,25 @@ var webHandlersRegistered = false
 
 // Client contains information about persistent clients.
 type Client struct {
-	IDs                 []string
-	Tags                []string
-	Name                string
-	UseOwnSettings      bool // false: use global settings
-	FilteringEnabled    bool
-	SafeSearchEnabled   bool
-	SafeBrowsingEnabled bool
-	ParentalEnabled     bool
-
-	UseOwnBlockedServices bool // false: use global settings
-	BlockedServices       []string
-
-	Upstreams []string // list of upstream servers to be used for the client's requests
-
-	// Custom upstream config for this client
-	// nil: not yet initialized
-	// not nil, but empty: initialized, no good upstreams
-	// not nil, not empty: Upstreams ready to be used
+	// upstreamConfig is the custom upstream config for this client.  If
+	// it's nil, it has not been initialized yet.  If it's non-nil and
+	// empty, there are no valid upstreams.  If it's non-nil and non-empty,
+	// these upstream must be used.
 	upstreamConfig *proxy.UpstreamConfig
+
+	Name string
+
+	IDs             []string
+	Tags            []string
+	BlockedServices []string
+	Upstreams       []string
+
+	UseOwnSettings        bool
+	FilteringEnabled      bool
+	SafeSearchEnabled     bool
+	SafeBrowsingEnabled   bool
+	ParentalEnabled       bool
+	UseOwnBlockedServices bool
 }
 
 type clientSource uint
@@ -56,20 +56,20 @@ type clientSource uint
 const (
 	ClientSourceWHOIS clientSource = iota
 	ClientSourceRDNS
-	ClientSourceDHCP
 	ClientSourceARP
+	ClientSourceDHCP
 	ClientSourceHostsFile
 )
 
 // RuntimeClient information
 type RuntimeClient struct {
+	WHOISInfo *RuntimeClientWHOISInfo
 	Host      string
 	Source    clientSource
-	WhoisInfo *RuntimeClientWhoisInfo
 }
 
-// RuntimeClientWhoisInfo is the filtered WHOIS data for a runtime client.
-type RuntimeClientWhoisInfo struct {
+// RuntimeClientWHOISInfo is the filtered WHOIS data for a runtime client.
+type RuntimeClientWHOISInfo struct {
 	City    string `json:"city,omitempty"`
 	Country string `json:"country,omitempty"`
 	Orgname string `json:"orgname,omitempty"`
@@ -78,10 +78,13 @@ type RuntimeClientWhoisInfo struct {
 type clientsContainer struct {
 	// TODO(a.garipov): Perhaps use a number of separate indices for
 	// different types (string, net.IP, and so on).
-	list    map[string]*Client        // name -> client
-	idIndex map[string]*Client        // ID -> client
-	ipToRC  map[string]*RuntimeClient // IP -> runtime client
-	lock    sync.Mutex
+	list    map[string]*Client // name -> client
+	idIndex map[string]*Client // ID -> client
+
+	// ipToRC is the IP address to *RuntimeClient map.
+	ipToRC *aghnet.IPMap
+
+	lock sync.Mutex
 
 	allTags *aghstrings.Set
 
@@ -109,7 +112,7 @@ func (clients *clientsContainer) Init(
 	}
 	clients.list = make(map[string]*Client)
 	clients.idIndex = make(map[string]*Client)
-	clients.ipToRC = make(map[string]*RuntimeClient)
+	clients.ipToRC = aghnet.NewIPMap(0)
 
 	clients.allTags = aghstrings.NewSet(clientTags...)
 
@@ -181,7 +184,7 @@ func (clients *clientsContainer) addFromConfig(objects []clientObject) {
 		}
 
 		for _, s := range cy.BlockedServices {
-			if !dnsfilter.BlockedSvcKnown(s) {
+			if !filtering.BlockedSvcKnown(s) {
 				log.Debug("clients: skipping unknown blocked-service %q", s)
 				continue
 			}
@@ -250,18 +253,17 @@ func (clients *clientsContainer) onHostsChanged() {
 	clients.addFromHostsFile()
 }
 
-// Exists checks if client with this ID already exists.
-func (clients *clientsContainer) Exists(id string, source clientSource) (ok bool) {
+// Exists checks if client with this IP address already exists.
+func (clients *clientsContainer) Exists(ip net.IP, source clientSource) (ok bool) {
 	clients.lock.Lock()
 	defer clients.lock.Unlock()
 
-	_, ok = clients.findLocked(id)
+	_, ok = clients.findLocked(ip.String())
 	if ok {
 		return true
 	}
 
-	var rc *RuntimeClient
-	rc, ok = clients.ipToRC[id]
+	rc, ok := clients.findRuntimeClientLocked(ip)
 	if !ok {
 		return false
 	}
@@ -270,12 +272,12 @@ func (clients *clientsContainer) Exists(id string, source clientSource) (ok bool
 	return source <= rc.Source
 }
 
-func toQueryLogWhois(wi *RuntimeClientWhoisInfo) (cw *querylog.ClientWhois) {
+func toQueryLogWHOIS(wi *RuntimeClientWHOISInfo) (cw *querylog.ClientWHOIS) {
 	if wi == nil {
-		return &querylog.ClientWhois{}
+		return &querylog.ClientWHOIS{}
 	}
 
-	return &querylog.ClientWhois{
+	return &querylog.ClientWHOIS{
 		City:    wi.City,
 		Country: wi.Country,
 		Orgname: wi.Orgname,
@@ -287,29 +289,29 @@ func toQueryLogWhois(wi *RuntimeClientWhoisInfo) (cw *querylog.ClientWhois) {
 func (clients *clientsContainer) findMultiple(ids []string) (c *querylog.Client, err error) {
 	for _, id := range ids {
 		var name string
-		whois := &querylog.ClientWhois{}
+		whois := &querylog.ClientWHOIS{}
+		ip := net.ParseIP(id)
 
 		c, ok := clients.Find(id)
 		if ok {
 			name = c.Name
-		} else {
-			var rc RuntimeClient
-			rc, ok = clients.FindRuntimeClient(id)
+		} else if ip != nil {
+			var rc *RuntimeClient
+			rc, ok = clients.FindRuntimeClient(ip)
 			if !ok {
 				continue
 			}
 
 			name = rc.Host
-			whois = toQueryLogWhois(rc.WhoisInfo)
+			whois = toQueryLogWHOIS(rc.WHOISInfo)
 		}
 
-		ip := net.ParseIP(id)
-		disallowed, disallowedRule := clients.dnsServer.IsBlockedIP(ip)
+		disallowed, disallowedRule := clients.dnsServer.IsBlockedClient(ip, id)
 
 		return &querylog.Client{
 			Name:           name,
 			DisallowedRule: disallowedRule,
-			Whois:          whois,
+			WHOIS:          whois,
 			Disallowed:     disallowed,
 		}, nil
 	}
@@ -333,37 +335,44 @@ func (clients *clientsContainer) Find(id string) (c *Client, ok bool) {
 	return c, true
 }
 
-// FindUpstreams looks for upstreams configured for the client
-// If no client found for this IP, or if no custom upstreams are configured,
-// this method returns nil
-func (clients *clientsContainer) FindUpstreams(ip string) *proxy.UpstreamConfig {
+// findUpstreams returns upstreams configured for the client, identified either
+// by its IP address or its ClientID.  upsConf is nil if the client isn't found
+// or if the client has no custom upstreams.
+func (clients *clientsContainer) findUpstreams(
+	id string,
+) (upsConf *proxy.UpstreamConfig, err error) {
 	clients.lock.Lock()
 	defer clients.lock.Unlock()
 
-	c, ok := clients.findLocked(ip)
+	c, ok := clients.findLocked(id)
 	if !ok {
-		return nil
+		return nil, nil
 	}
 
 	upstreams := aghstrings.FilterOut(c.Upstreams, aghstrings.IsCommentOrEmpty)
 	if len(upstreams) == 0 {
-		return nil
+		return nil, nil
 	}
 
-	if c.upstreamConfig == nil {
-		conf, err := proxy.ParseUpstreamsConfig(
-			upstreams,
-			upstream.Options{
-				Bootstrap: config.DNS.BootstrapDNS,
-				Timeout:   dnsforward.DefaultTimeout,
-			},
-		)
-		if err == nil {
-			c.upstreamConfig = &conf
-		}
+	if c.upstreamConfig != nil {
+		return c.upstreamConfig, nil
 	}
 
-	return c.upstreamConfig
+	var conf *proxy.UpstreamConfig
+	conf, err = proxy.ParseUpstreamsConfig(
+		upstreams,
+		&upstream.Options{
+			Bootstrap: config.DNS.BootstrapDNS,
+			Timeout:   config.DNS.UpstreamTimeout.Duration,
+		},
+	)
+	if err != nil {
+		return nil, err
+	}
+
+	c.upstreamConfig = conf
+
+	return conf, nil
 }
 
 // findLocked searches for a client by its ID.  For internal use only.
@@ -416,33 +425,46 @@ func (clients *clientsContainer) findLocked(id string) (c *Client, ok bool) {
 	return nil, false
 }
 
+// findRuntimeClientLocked finds a runtime client by their IP address.  For
+// internal use only.
+func (clients *clientsContainer) findRuntimeClientLocked(ip net.IP) (rc *RuntimeClient, ok bool) {
+	var v interface{}
+	v, ok = clients.ipToRC.Get(ip)
+	if !ok {
+		return nil, false
+	}
+
+	rc, ok = v.(*RuntimeClient)
+	if !ok {
+		log.Error("clients: bad type %T in ipToRC for %s", v, ip)
+
+		return nil, false
+	}
+
+	return rc, true
+}
+
 // FindRuntimeClient finds a runtime client by their IP.
-func (clients *clientsContainer) FindRuntimeClient(ip string) (RuntimeClient, bool) {
-	ipAddr := net.ParseIP(ip)
-	if ipAddr == nil {
-		return RuntimeClient{}, false
+func (clients *clientsContainer) FindRuntimeClient(ip net.IP) (rc *RuntimeClient, ok bool) {
+	if ip == nil {
+		return nil, false
 	}
 
 	clients.lock.Lock()
 	defer clients.lock.Unlock()
 
-	rc, ok := clients.ipToRC[ip]
-	if ok {
-		return *rc, true
-	}
-
-	return RuntimeClient{}, false
+	return clients.findRuntimeClientLocked(ip)
 }
 
 // check validates the client.
 func (clients *clientsContainer) check(c *Client) (err error) {
 	switch {
 	case c == nil:
-		return agherr.Error("client is nil")
+		return errors.Error("client is nil")
 	case c.Name == "":
-		return agherr.Error("invalid name")
+		return errors.Error("invalid name")
 	case len(c.IDs) == 0:
-		return agherr.Error("id required")
+		return errors.Error("id required")
 	default:
 		// Go on.
 	}
@@ -570,14 +592,14 @@ func (clients *clientsContainer) Update(name string, c *Client) (err error) {
 
 	prev, ok := clients.list[name]
 	if !ok {
-		return agherr.Error("client not found")
+		return errors.Error("client not found")
 	}
 
 	// First, check the name index.
 	if prev.Name != c.Name {
 		_, ok = clients.list[c.Name]
 		if ok {
-			return agherr.Error("client already exists")
+			return errors.Error("client already exists")
 		}
 	}
 
@@ -613,20 +635,20 @@ func (clients *clientsContainer) Update(name string, c *Client) (err error) {
 	return nil
 }
 
-// SetWhoisInfo sets the WHOIS information for a client.
-func (clients *clientsContainer) SetWhoisInfo(ip string, wi *RuntimeClientWhoisInfo) {
+// SetWHOISInfo sets the WHOIS information for a client.
+func (clients *clientsContainer) SetWHOISInfo(ip net.IP, wi *RuntimeClientWHOISInfo) {
 	clients.lock.Lock()
 	defer clients.lock.Unlock()
 
-	_, ok := clients.findLocked(ip)
+	_, ok := clients.findLocked(ip.String())
 	if ok {
 		log.Debug("clients: client for %s is already created, ignore whois info", ip)
 		return
 	}
 
-	rc, ok := clients.ipToRC[ip]
+	rc, ok := clients.findRuntimeClientLocked(ip)
 	if ok {
-		rc.WhoisInfo = wi
+		rc.WHOISInfo = wi
 		log.Debug("clients: set whois info for runtime client %s: %+v", rc.Host, wi)
 
 		return
@@ -638,15 +660,16 @@ func (clients *clientsContainer) SetWhoisInfo(ip string, wi *RuntimeClientWhoisI
 		Source: ClientSourceWHOIS,
 	}
 
-	rc.WhoisInfo = wi
-	clients.ipToRC[ip] = rc
+	rc.WHOISInfo = wi
+
+	clients.ipToRC.Set(ip, rc)
 
 	log.Debug("clients: set whois info for runtime client with ip %s: %+v", ip, wi)
 }
 
 // AddHost adds a new IP-hostname pairing.  The priorities of the sources is
 // taken into account.  ok is true if the pairing was added.
-func (clients *clientsContainer) AddHost(ip, host string, src clientSource) (ok bool, err error) {
+func (clients *clientsContainer) AddHost(ip net.IP, host string, src clientSource) (ok bool, err error) {
 	clients.lock.Lock()
 	defer clients.lock.Unlock()
 
@@ -656,9 +679,9 @@ func (clients *clientsContainer) AddHost(ip, host string, src clientSource) (ok 
 }
 
 // addHostLocked adds a new IP-hostname pairing.  For internal use only.
-func (clients *clientsContainer) addHostLocked(ip, host string, src clientSource) (ok bool) {
+func (clients *clientsContainer) addHostLocked(ip net.IP, host string, src clientSource) (ok bool) {
 	var rc *RuntimeClient
-	rc, ok = clients.ipToRC[ip]
+	rc, ok = clients.findRuntimeClientLocked(ip)
 	if ok {
 		if rc.Source > src {
 			return false
@@ -669,13 +692,13 @@ func (clients *clientsContainer) addHostLocked(ip, host string, src clientSource
 		rc = &RuntimeClient{
 			Host:      host,
 			Source:    src,
-			WhoisInfo: &RuntimeClientWhoisInfo{},
+			WHOISInfo: &RuntimeClientWHOISInfo{},
 		}
 
-		clients.ipToRC[ip] = rc
+		clients.ipToRC.Set(ip, rc)
 	}
 
-	log.Debug("clients: added %q -> %q [%d]", ip, host, len(clients.ipToRC))
+	log.Debug("clients: added %s -> %q [%d]", ip, host, clients.ipToRC.Len())
 
 	return true
 }
@@ -683,12 +706,21 @@ func (clients *clientsContainer) addHostLocked(ip, host string, src clientSource
 // rmHostsBySrc removes all entries that match the specified source.
 func (clients *clientsContainer) rmHostsBySrc(src clientSource) {
 	n := 0
-	for k, v := range clients.ipToRC {
-		if v.Source == src {
-			delete(clients.ipToRC, k)
+	clients.ipToRC.Range(func(ip net.IP, v interface{}) (cont bool) {
+		rc, ok := v.(*RuntimeClient)
+		if !ok {
+			log.Error("clients: bad type %T in ipToRC for %s", v, ip)
+
+			return true
+		}
+
+		if rc.Source == src {
+			clients.ipToRC.Del(ip)
 			n++
 		}
-	}
+
+		return true
+	})
 
 	log.Debug("clients: removed %d client aliases", n)
 }
@@ -708,16 +740,23 @@ func (clients *clientsContainer) addFromHostsFile() {
 	clients.rmHostsBySrc(ClientSourceHostsFile)
 
 	n := 0
-	for ip, names := range hosts {
+	hosts.Range(func(ip net.IP, v interface{}) (cont bool) {
+		names, ok := v.([]string)
+		if !ok {
+			log.Error("dns: bad type %T in ipToRC for %s", v, ip)
+		}
+
 		for _, name := range names {
-			ok := clients.addHostLocked(ip, name, ClientSourceHostsFile)
+			ok = clients.addHostLocked(ip, name, ClientSourceHostsFile)
 			if ok {
 				n++
 			}
 		}
-	}
 
-	log.Debug("Clients: added %d client aliases from system hosts-file", n)
+		return true
+	})
+
+	log.Debug("clients: added %d client aliases from system hosts-file", n)
 }
 
 // addFromSystemARP adds the IP-hostname pairings from the output of the arp -a
@@ -745,15 +784,16 @@ func (clients *clientsContainer) addFromSystemARP() {
 	// TODO(a.garipov): Rewrite to use bufio.Scanner.
 	lines := strings.Split(string(data), "\n")
 	for _, ln := range lines {
-		open := strings.Index(ln, " (")
-		close := strings.Index(ln, ") ")
-		if open == -1 || close == -1 || open >= close {
+		lparen := strings.Index(ln, " (")
+		rparen := strings.Index(ln, ") ")
+		if lparen == -1 || rparen == -1 || lparen >= rparen {
 			continue
 		}
 
-		host := ln[:open]
-		ip := ln[open+2 : close]
-		if aghnet.ValidateDomainName(host) != nil || net.ParseIP(ip) == nil {
+		host := ln[:lparen]
+		ipStr := ln[lparen+2 : rparen]
+		ip := net.ParseIP(ipStr)
+		if aghnet.ValidateDomainName(host) != nil || ip == nil {
 			continue
 		}
 
@@ -789,7 +829,7 @@ func (clients *clientsContainer) updateFromDHCP(add bool) {
 			continue
 		}
 
-		ok := clients.addHostLocked(l.IP.String(), l.Hostname, ClientSourceDHCP)
+		ok := clients.addHostLocked(l.IP, l.Hostname, ClientSourceDHCP)
 		if ok {
 			n++
 		}

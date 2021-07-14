@@ -10,9 +10,7 @@ import (
 	"encoding/base64"
 	"encoding/json"
 	"encoding/pem"
-	"errors"
 	"fmt"
-	"io/ioutil"
 	"net/http"
 	"os"
 	"path/filepath"
@@ -22,6 +20,7 @@ import (
 	"sync"
 	"time"
 
+	"github.com/AdguardTeam/golibs/errors"
 	"github.com/AdguardTeam/golibs/log"
 	"golang.org/x/sys/cpu"
 )
@@ -49,7 +48,7 @@ func tlsCreate(conf tlsConfigSettings) *TLSMod {
 				PortHTTPS:           conf.PortHTTPS,
 				PortDNSOverTLS:      conf.PortDNSOverTLS,
 				PortDNSOverQUIC:     conf.PortDNSOverQUIC,
-				AllowUnencryptedDOH: conf.AllowUnencryptedDOH,
+				AllowUnencryptedDoH: conf.AllowUnencryptedDoH,
 			}}
 		}
 		t.setCertFileTime()
@@ -164,7 +163,7 @@ func tlsLoadConfig(tls *tlsConfigSettings, status *tlsConfigStatus) bool {
 			status.WarningValidation = "certificate data and file can't be set together"
 			return false
 		}
-		tls.CertificateChainData, err = ioutil.ReadFile(tls.CertificatePath)
+		tls.CertificateChainData, err = os.ReadFile(tls.CertificatePath)
 		if err != nil {
 			status.WarningValidation = err.Error()
 			return false
@@ -177,7 +176,7 @@ func tlsLoadConfig(tls *tlsConfigSettings, status *tlsConfigStatus) bool {
 			status.WarningValidation = "private key data and file can't be set together"
 			return false
 		}
-		tls.PrivateKeyData, err = ioutil.ReadFile(tls.PrivateKeyPath)
+		tls.PrivateKeyData, err = os.ReadFile(tls.PrivateKeyPath)
 		if err != nil {
 			status.WarningValidation = err.Error()
 			return false
@@ -342,14 +341,14 @@ func verifyCertChain(data *tlsConfigStatus, certChain, serverName string) error 
 		parsed, err := x509.ParseCertificate(cert.Bytes)
 		if err != nil {
 			data.WarningValidation = fmt.Sprintf("Failed to parse certificate: %s", err)
-			return errors.New(data.WarningValidation)
+			return errors.Error(data.WarningValidation)
 		}
 		parsedCerts = append(parsedCerts, parsed)
 	}
 
 	if len(parsedCerts) == 0 {
 		data.WarningValidation = "You have specified an empty certificate"
-		return errors.New(data.WarningValidation)
+		return errors.Error(data.WarningValidation)
 	}
 
 	data.ValidCert = true
@@ -416,14 +415,14 @@ func validatePkey(data *tlsConfigStatus, pkey string) error {
 
 	if key == nil {
 		data.WarningValidation = "No valid keys were found"
-		return errors.New(data.WarningValidation)
+		return errors.Error(data.WarningValidation)
 	}
 
 	// parse the decoded key
 	_, keytype, err := parsePrivateKey(key.Bytes)
 	if err != nil {
 		data.WarningValidation = fmt.Sprintf("Failed to parse private key: %s", err)
-		return errors.New(data.WarningValidation)
+		return errors.Error(data.WarningValidation)
 	}
 
 	data.ValidKey = true
@@ -480,7 +479,7 @@ func parsePrivateKey(der []byte) (crypto.PrivateKey, string, error) {
 		case *ecdsa.PrivateKey:
 			return key, "ECDSA", nil
 		default:
-			return nil, "", errors.New("tls: found unknown private key type in PKCS#8 wrapping")
+			return nil, "", errors.Error("tls: found unknown private key type in PKCS#8 wrapping")
 		}
 	}
 
@@ -488,7 +487,7 @@ func parsePrivateKey(der []byte) (crypto.PrivateKey, string, error) {
 		return key, "ECDSA", nil
 	}
 
-	return nil, "", errors.New("tls: failed to parse private key")
+	return nil, "", errors.Error("tls: failed to parse private key")
 }
 
 // unmarshalTLS handles base64-encoded certificates transparently
@@ -574,18 +573,17 @@ func LoadSystemRootCAs() (roots *x509.CertPool) {
 	}
 	roots = x509.NewCertPool()
 	for _, dir := range dirs {
-		fis, err := ioutil.ReadDir(dir)
+		dirEnts, err := os.ReadDir(dir)
 		if errors.Is(err, os.ErrNotExist) {
 			continue
-		}
-		if err != nil {
+		} else if err != nil {
 			log.Error("opening directory: %q: %s", dir, err)
 		}
 
 		var rootsAdded bool
-		for _, fi := range fis {
+		for _, de := range dirEnts {
 			var certData []byte
-			certData, err = ioutil.ReadFile(filepath.Join(dir, fi.Name()))
+			certData, err = os.ReadFile(filepath.Join(dir, de.Name()))
 			if err == nil && roots.AppendCertsFromPEM(certData) {
 				rootsAdded = true
 			}

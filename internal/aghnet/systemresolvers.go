@@ -3,7 +3,6 @@ package aghnet
 import (
 	"time"
 
-	"github.com/AdguardTeam/AdGuardHome/internal/agherr"
 	"github.com/AdguardTeam/golibs/log"
 )
 
@@ -17,25 +16,17 @@ type HostGenFunc func() (host string)
 
 // SystemResolvers helps to work with local resolvers' addresses provided by OS.
 type SystemResolvers interface {
-	// Get returns the slice of local resolvers' addresses.
-	// It should be safe for concurrent use.
+	// Get returns the slice of local resolvers' addresses.  It should be
+	// safe for concurrent use.
 	Get() (rs []string)
 	// refresh refreshes the local resolvers' addresses cache.  It should be
 	// safe for concurrent use.
 	refresh() (err error)
 }
 
-const (
-	// fakeDialErr is an error which dialFunc is expected to return.
-	fakeDialErr agherr.Error = "this error signals the successful dialFunc work"
-
-	// badAddrPassedErr is returned when dialFunc can't parse an IP address.
-	badAddrPassedErr agherr.Error = "the passed string is not a valid IP address"
-)
-
 // refreshWithTicker refreshes the cache of sr after each tick form tickCh.
 func refreshWithTicker(sr SystemResolvers, tickCh <-chan time.Time) {
-	defer agherr.LogPanic("systemResolvers")
+	defer log.OnPanic("systemResolvers")
 
 	// TODO(e.burkov): Implement a functionality to stop ticker.
 	for range tickCh {

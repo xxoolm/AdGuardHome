@@ -6,8 +6,9 @@ import (
 	"time"
 
 	"github.com/AdguardTeam/AdGuardHome/internal/aghnet"
+	"github.com/AdguardTeam/AdGuardHome/internal/aghstrings"
 	"github.com/AdguardTeam/AdGuardHome/internal/dhcpd"
-	"github.com/AdguardTeam/AdGuardHome/internal/dnsfilter"
+	"github.com/AdguardTeam/AdGuardHome/internal/filtering"
 	"github.com/AdguardTeam/dnsproxy/proxy"
 	"github.com/AdguardTeam/golibs/log"
 	"github.com/miekg/dns"
@@ -20,9 +21,9 @@ type dnsContext struct {
 	srv      *Server
 	proxyCtx *proxy.DNSContext
 	// setts are the filtering settings for the client.
-	setts     *dnsfilter.FilteringSettings
+	setts     *filtering.Settings
 	startTime time.Time
-	result    *dnsfilter.Result
+	result    *filtering.Result
 	// origResp is the response received from upstream.  It is set when the
 	// response is modified by filters.
 	origResp *dns.Msg
@@ -31,7 +32,7 @@ type dnsContext struct {
 	unreversedReqIP net.IP
 	// err is the error returned from a processing function.
 	err error
-	// clientID is the clientID from DOH, DOQ, or DOT, if provided.
+	// clientID is the clientID from DoH, DoQ, or DoT, if provided.
 	clientID string
 	// origQuestion is the question received from the client.  It is set
 	// when the request is modified by rewrites.
@@ -70,7 +71,7 @@ func (s *Server) handleDNSRequest(_ *proxy.Proxy, d *proxy.DNSContext) error {
 	ctx := &dnsContext{
 		srv:       s,
 		proxyCtx:  d,
-		result:    &dnsfilter.Result{},
+		result:    &filtering.Result{},
 		startTime: time.Now(),
 	}
 
@@ -82,15 +83,16 @@ func (s *Server) handleDNSRequest(_ *proxy.Proxy, d *proxy.DNSContext) error {
 	// (*proxy.Proxy).handleDNSRequest method performs it before calling the
 	// appropriate handler.
 	mods := []modProcessFunc{
+		s.processRecursion,
 		processInitial,
 		s.processDetermineLocal,
 		s.processInternalHosts,
 		s.processRestrictLocal,
 		s.processInternalIPAddrs,
-		processClientID,
+		s.processClientID,
 		processFilteringBeforeRequest,
 		s.processLocalPTR,
-		processUpstream,
+		s.processUpstream,
 		processDNSSECAfterResponse,
 		processFilteringAfterResponse,
 		s.ipset.process,
@@ -114,6 +116,22 @@ func (s *Server) handleDNSRequest(_ *proxy.Proxy, d *proxy.DNSContext) error {
 		d.Res.Compress = true // some devices require DNS message compression
 	}
 	return nil
+}
+
+// processRecursion checks the incoming request and halts it's handling if s
+// have tried to resolve it recently.
+func (s *Server) processRecursion(dctx *dnsContext) (rc resultCode) {
+	pctx := dctx.proxyCtx
+
+	if msg := pctx.Req; msg != nil && s.recDetector.check(*msg) {
+		log.Debug("recursion detected resolving %q", msg.Question[0].Name)
+		pctx.Res = s.genNXDomain(pctx.Req)
+
+		return resultCodeFinish
+
+	}
+
+	return resultCodeSuccess
 }
 
 // Perform initial checks;  process WHOIS & rDNS
@@ -147,7 +165,7 @@ func (s *Server) setTableHostToIP(t hostToIPTable) {
 	s.tableHostToIP = t
 }
 
-func (s *Server) setTableIPToHost(t ipToHostTable) {
+func (s *Server) setTableIPToHost(t *aghnet.IPMap) {
 	s.tableIPToHostLock.Lock()
 	defer s.tableIPToHostLock.Unlock()
 
@@ -170,12 +188,12 @@ func (s *Server) onDHCPLeaseChanged(flags int) {
 	}
 
 	var hostToIP hostToIPTable
-	var ipToHost ipToHostTable
+	var ipToHost *aghnet.IPMap
 	if add {
-		hostToIP = make(hostToIPTable)
-		ipToHost = make(ipToHostTable)
-
 		ll := s.dhcpServer.Leases(dhcpd.LeasesAll)
+
+		hostToIP = make(hostToIPTable, len(ll))
+		ipToHost = aghnet.NewIPMap(len(ll))
 
 		for _, l := range ll {
 			// TODO(a.garipov): Remove this after we're finished
@@ -192,14 +210,14 @@ func (s *Server) onDHCPLeaseChanged(flags int) {
 
 			lowhost := strings.ToLower(l.Hostname)
 
-			ipToHost[l.IP.String()] = lowhost
+			ipToHost.Set(l.IP, lowhost)
 
 			ip := make(net.IP, 4)
 			copy(ip, l.IP.To4())
 			hostToIP[lowhost] = ip
 		}
 
-		log.Debug("dns: added %d A/PTR entries from DHCP", len(ipToHost))
+		log.Debug("dns: added %d A/PTR entries from DHCP", ipToHost.Len())
 	}
 
 	s.setTableHostToIP(hostToIP)
@@ -212,7 +230,7 @@ func (s *Server) processDetermineLocal(dctx *dnsContext) (rc resultCode) {
 	rc = resultCodeSuccess
 
 	var ip net.IP
-	if ip = IPFromAddr(dctx.proxyCtx.Addr); ip == nil {
+	if ip = aghnet.IPFromAddr(dctx.proxyCtx.Addr); ip == nil {
 		return rc
 	}
 
@@ -249,6 +267,10 @@ func (s *Server) hostToIP(host string) (ip net.IP, ok bool) {
 //
 // TODO(a.garipov): Adapt to AAAA as well.
 func (s *Server) processInternalHosts(dctx *dnsContext) (rc resultCode) {
+	if !s.dhcpServer.Enabled() {
+		return resultCodeSuccess
+	}
+
 	req := dctx.proxyCtx.Req
 	q := req.Question[0]
 
@@ -355,9 +377,19 @@ func (s *Server) ipToHost(ip net.IP) (host string, ok bool) {
 		return "", false
 	}
 
-	host, ok = s.tableIPToHost[ip.String()]
+	var v interface{}
+	v, ok = s.tableIPToHost.Get(ip)
+	if !ok {
+		return "", false
+	}
 
-	return host, ok
+	if host, ok = v.(string); !ok {
+		log.Error("dns: bad type %T in tableIPToHost for %s", v, ip)
+
+		return "", false
+	}
+
+	return host, true
 }
 
 // Respond to PTR requests if the target IP is leased by our DHCP server and the
@@ -410,20 +442,26 @@ func (s *Server) processLocalPTR(ctx *dnsContext) (rc resultCode) {
 		return resultCodeSuccess
 	}
 
+	s.serverLock.RLock()
+	defer s.serverLock.RUnlock()
+
 	if !s.subnetDetector.IsLocallyServedNetwork(ip) {
 		return resultCodeSuccess
 	}
 
-	err := s.localResolvers.Resolve(d)
-	if err != nil {
-		ctx.err = err
+	if s.conf.UsePrivateRDNS {
+		s.recDetector.add(*d.Req)
+		if err := s.localResolvers.Resolve(d); err != nil {
+			ctx.err = err
 
-		return resultCodeError
+			return resultCodeError
+		}
 	}
 
 	if d.Res == nil {
 		d.Res = s.genNXDomain(d.Req)
 
+		// Do not even put into query log.
 		return resultCodeFinish
 	}
 
@@ -439,24 +477,20 @@ func processFilteringBeforeRequest(ctx *dnsContext) (rc resultCode) {
 		return resultCodeSuccess // response is already set - nothing to do
 	}
 
-	s.RLock()
-	// Synchronize access to s.dnsFilter so it won't be suddenly uninitialized while in use.
-	// This could happen after proxy server has been stopped, but its workers are not yet exited.
-	//
-	// A better approach is for proxy.Stop() to wait until all its workers exit,
-	//  but this would require the Upstream interface to have Close() function
-	//  (to prevent from hanging while waiting for unresponsive DNS server to respond).
+	s.serverLock.RLock()
+	defer s.serverLock.RUnlock()
+
+	ctx.protectionEnabled = s.conf.ProtectionEnabled && s.dnsFilter != nil
+	if !ctx.protectionEnabled {
+		return resultCodeSuccess
+	}
+
+	if ctx.setts == nil {
+		ctx.setts = s.getClientRequestFilteringSettings(ctx)
+	}
 
 	var err error
-	ctx.protectionEnabled = s.conf.ProtectionEnabled && s.dnsFilter != nil
-	if ctx.protectionEnabled {
-		if ctx.setts == nil {
-			ctx.setts = s.getClientRequestFilteringSettings(ctx)
-		}
-		ctx.result, err = s.filterDNSRequest(ctx)
-	}
-	s.RUnlock()
-
+	ctx.result, err = s.filterDNSRequest(ctx)
 	if err != nil {
 		ctx.err = err
 
@@ -466,28 +500,40 @@ func processFilteringBeforeRequest(ctx *dnsContext) (rc resultCode) {
 	return resultCodeSuccess
 }
 
+// ipStringFromAddr extracts an IP address string from net.Addr.
+func ipStringFromAddr(addr net.Addr) (ipStr string) {
+	if ip := aghnet.IPFromAddr(addr); ip != nil {
+		return ip.String()
+	}
+
+	return ""
+}
+
 // processUpstream passes request to upstream servers and handles the response.
-func processUpstream(ctx *dnsContext) (rc resultCode) {
-	s := ctx.srv
+func (s *Server) processUpstream(ctx *dnsContext) (rc resultCode) {
 	d := ctx.proxyCtx
 	if d.Res != nil {
 		return resultCodeSuccess // response is already set - nothing to do
 	}
 
 	if d.Addr != nil && s.conf.GetCustomUpstreamByClient != nil {
-		clientIP := IPStringFromAddr(d.Addr)
-		upstreamsConf := s.conf.GetCustomUpstreamByClient(clientIP)
-		if upstreamsConf != nil {
-			log.Debug("Using custom upstreams for %s", clientIP)
-			d.CustomUpstreamConfig = upstreamsConf
+		// Use the clientID first, since it has a higher priority.
+		id := aghstrings.Coalesce(ctx.clientID, ipStringFromAddr(d.Addr))
+		upsConf, err := s.conf.GetCustomUpstreamByClient(id)
+		if err != nil {
+			log.Error("dns: getting custom upstreams for client %s: %s", id, err)
+		} else if upsConf != nil {
+			log.Debug("dns: using custom upstreams for client %s", id)
+			d.CustomUpstreamConfig = upsConf
 		}
 	}
 
+	req := d.Req
 	if s.conf.EnableDNSSEC {
-		opt := d.Req.IsEdns0()
+		opt := req.IsEdns0()
 		if opt == nil {
-			log.Debug("dns: Adding OPT record with DNSSEC flag")
-			d.Req.SetEdns0(4096, true)
+			log.Debug("dns: adding OPT record with DNSSEC flag")
+			req.SetEdns0(4096, true)
 		} else if !opt.Do() {
 			opt.SetDo(true)
 		} else {
@@ -496,13 +542,12 @@ func processUpstream(ctx *dnsContext) (rc resultCode) {
 	}
 
 	// request was not filtered so let it be processed further
-	err := s.dnsProxy.Resolve(d)
-	if err != nil {
-		ctx.err = err
+	if ctx.err = s.dnsProxy.Resolve(d); ctx.err != nil {
 		return resultCodeError
 	}
 
 	ctx.responseFromUpstream = true
+
 	return resultCodeSuccess
 }
 
@@ -560,8 +605,8 @@ func processFilteringAfterResponse(ctx *dnsContext) (rc resultCode) {
 	var err error
 
 	switch res.Reason {
-	case dnsfilter.Rewritten,
-		dnsfilter.RewrittenRule:
+	case filtering.Rewritten,
+		filtering.RewrittenRule:
 
 		if len(ctx.origQuestion.Name) == 0 {
 			// origQuestion is set in case we get only CNAME without IP from rewrites table
@@ -578,7 +623,7 @@ func processFilteringAfterResponse(ctx *dnsContext) (rc resultCode) {
 			d.Res.Answer = answer
 		}
 
-	case dnsfilter.NotFilteredAllowList:
+	case filtering.NotFilteredAllowList:
 		// nothing
 
 	default:
@@ -595,7 +640,7 @@ func processFilteringAfterResponse(ctx *dnsContext) (rc resultCode) {
 		if ctx.result != nil {
 			ctx.origResp = origResp2 // matched by response
 		} else {
-			ctx.result = &dnsfilter.Result{}
+			ctx.result = &filtering.Result{}
 		}
 	}
 

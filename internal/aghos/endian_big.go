@@ -1,3 +1,4 @@
+//go:build mips || mips64
 // +build mips mips64
 
 // This file is an adapted version of github.com/josharian/native.

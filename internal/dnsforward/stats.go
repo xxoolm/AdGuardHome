@@ -4,7 +4,8 @@ import (
 	"strings"
 	"time"
 
-	"github.com/AdguardTeam/AdGuardHome/internal/dnsfilter"
+	"github.com/AdguardTeam/AdGuardHome/internal/aghnet"
+	"github.com/AdguardTeam/AdGuardHome/internal/filtering"
 	"github.com/AdguardTeam/AdGuardHome/internal/querylog"
 	"github.com/AdguardTeam/AdGuardHome/internal/stats"
 	"github.com/AdguardTeam/dnsproxy/proxy"
@@ -25,7 +26,9 @@ func processQueryLogsAndStats(ctx *dnsContext) (rc resultCode) {
 		shouldLog = false
 	}
 
-	s.RLock()
+	s.serverLock.RLock()
+	defer s.serverLock.RUnlock()
+
 	// Synchronize access to s.queryLog and s.stats so they won't be suddenly uninitialized while in use.
 	// This can happen after proxy server has been stopped, but its workers haven't yet exited.
 	if shouldLog && s.queryLog != nil {
@@ -35,17 +38,17 @@ func processQueryLogsAndStats(ctx *dnsContext) (rc resultCode) {
 			OrigAnswer: ctx.origResp,
 			Result:     ctx.result,
 			Elapsed:    elapsed,
-			ClientIP:   IPFromAddr(pctx.Addr),
+			ClientIP:   aghnet.IPFromAddr(pctx.Addr),
 			ClientID:   ctx.clientID,
 		}
 
 		switch pctx.Proto {
 		case proxy.ProtoHTTPS:
-			p.ClientProto = querylog.ClientProtoDOH
+			p.ClientProto = querylog.ClientProtoDoH
 		case proxy.ProtoQUIC:
-			p.ClientProto = querylog.ClientProtoDOQ
+			p.ClientProto = querylog.ClientProtoDoQ
 		case proxy.ProtoTLS:
-			p.ClientProto = querylog.ClientProtoDOT
+			p.ClientProto = querylog.ClientProtoDoT
 		case proxy.ProtoDNSCrypt:
 			p.ClientProto = querylog.ClientProtoDNSCrypt
 		default:
@@ -61,12 +64,11 @@ func processQueryLogsAndStats(ctx *dnsContext) (rc resultCode) {
 	}
 
 	s.updateStats(ctx, elapsed, *ctx.result)
-	s.RUnlock()
 
 	return resultCodeSuccess
 }
 
-func (s *Server) updateStats(ctx *dnsContext, elapsed time.Duration, res dnsfilter.Result) {
+func (s *Server) updateStats(ctx *dnsContext, elapsed time.Duration, res filtering.Result) {
 	if s.stats == nil {
 		return
 	}
@@ -78,7 +80,7 @@ func (s *Server) updateStats(ctx *dnsContext, elapsed time.Duration, res dnsfilt
 
 	if clientID := ctx.clientID; clientID != "" {
 		e.Client = clientID
-	} else if ip := IPFromAddr(pctx.Addr); ip != nil {
+	} else if ip := aghnet.IPFromAddr(pctx.Addr); ip != nil {
 		e.Client = ip.String()
 	}
 
@@ -86,17 +88,15 @@ func (s *Server) updateStats(ctx *dnsContext, elapsed time.Duration, res dnsfilt
 	e.Result = stats.RNotFiltered
 
 	switch res.Reason {
-	case dnsfilter.FilteredSafeBrowsing:
+	case filtering.FilteredSafeBrowsing:
 		e.Result = stats.RSafeBrowsing
-	case dnsfilter.FilteredParental:
+	case filtering.FilteredParental:
 		e.Result = stats.RParental
-	case dnsfilter.FilteredSafeSearch:
+	case filtering.FilteredSafeSearch:
 		e.Result = stats.RSafeSearch
-	case dnsfilter.FilteredBlockList:
-		fallthrough
-	case dnsfilter.FilteredInvalid:
-		fallthrough
-	case dnsfilter.FilteredBlockedService:
+	case filtering.FilteredBlockList,
+		filtering.FilteredInvalid,
+		filtering.FilteredBlockedService:
 		e.Result = stats.RFiltered
 	}
 

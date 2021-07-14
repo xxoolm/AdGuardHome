@@ -5,9 +5,8 @@ import (
 	"context"
 	"crypto/tls"
 	"crypto/x509"
-	"errors"
 	"fmt"
-	"io/ioutil"
+	"io/fs"
 	"net"
 	"net/http"
 	"net/http/pprof"
@@ -16,21 +15,20 @@ import (
 	"os/signal"
 	"path/filepath"
 	"runtime"
-	"strconv"
 	"sync"
 	"syscall"
 	"time"
 
-	"github.com/AdguardTeam/AdGuardHome/internal/agherr"
 	"github.com/AdguardTeam/AdGuardHome/internal/aghnet"
 	"github.com/AdguardTeam/AdGuardHome/internal/aghos"
 	"github.com/AdguardTeam/AdGuardHome/internal/dhcpd"
-	"github.com/AdguardTeam/AdGuardHome/internal/dnsfilter"
 	"github.com/AdguardTeam/AdGuardHome/internal/dnsforward"
+	"github.com/AdguardTeam/AdGuardHome/internal/filtering"
 	"github.com/AdguardTeam/AdGuardHome/internal/querylog"
 	"github.com/AdguardTeam/AdGuardHome/internal/stats"
 	"github.com/AdguardTeam/AdGuardHome/internal/updater"
 	"github.com/AdguardTeam/AdGuardHome/internal/version"
+	"github.com/AdguardTeam/golibs/errors"
 	"github.com/AdguardTeam/golibs/log"
 	"gopkg.in/natefinch/lumberjack.v2"
 )
@@ -50,8 +48,8 @@ type homeContext struct {
 	queryLog   querylog.QueryLog         // query log module
 	dnsServer  *dnsforward.Server        // DNS module
 	rdns       *RDNS                     // rDNS module
-	whois      *Whois                    // WHOIS module
-	dnsFilter  *dnsfilter.DNSFilter      // DNS filtering module
+	whois      *WHOIS                    // WHOIS module
+	dnsFilter  *filtering.DNSFilter      // DNS filtering module
 	dhcpServer *dhcpd.Server             // DHCP module
 	auth       *Auth                     // HTTP authentication module
 	filters    Filtering                 // DNS filtering module
@@ -92,7 +90,7 @@ func (c *homeContext) getDataDir() string {
 var Context homeContext
 
 // Main is the entry point
-func Main() {
+func Main(clientBuildFS fs.FS) {
 	// config can be specified, which reads options from there, but other command line flags have to override config values
 	// therefore, we must do it manually instead of using a lib
 	args := loadOptions()
@@ -117,12 +115,20 @@ func Main() {
 	}()
 
 	if args.serviceControlAction != "" {
-		handleServiceControlAction(args)
+		// TODO(a.garipov): github.com/kardianos/service doesn't seem to
+		// support OpenBSD currently.  Either patch it to do so or make
+		// our own implementation of the service.System interface.
+		if runtime.GOOS == "openbsd" {
+			log.Fatal("service actions are not supported on openbsd, see issue 3226")
+		}
+
+		handleServiceControlAction(args, clientBuildFS)
+
 		return
 	}
 
 	// run the protection
-	run(args)
+	run(args, clientBuildFS)
 }
 
 func setupContext(args options) {
@@ -177,14 +183,71 @@ func setupContext(args options) {
 	Context.mux = http.NewServeMux()
 }
 
-func setupConfig(args options) {
+// logIfUnsupported logs a formatted warning if the error is one of the
+// unsupported errors and returns nil.  If err is nil, logIfUnsupported returns
+// nil.  Otherise, it returns err.
+func logIfUnsupported(msg string, err error) (outErr error) {
+	if unsupErr := (&aghos.UnsupportedError{}); errors.As(err, &unsupErr) {
+		log.Debug(msg, err)
+	} else if err != nil {
+		return err
+	}
+
+	return nil
+}
+
+// configureOS sets the OS-related configuration.
+func configureOS(conf *configuration) (err error) {
+	osConf := conf.OSConfig
+	if osConf == nil {
+		return nil
+	}
+
+	if osConf.Group != "" {
+		err = aghos.SetGroup(osConf.Group)
+		err = logIfUnsupported("warning: setting group", err)
+		if err != nil {
+			return fmt.Errorf("setting group: %w", err)
+		}
+
+		log.Info("group set to %s", osConf.Group)
+	}
+
+	if osConf.User != "" {
+		err = aghos.SetUser(osConf.User)
+		err = logIfUnsupported("warning: setting user", err)
+		if err != nil {
+			return fmt.Errorf("setting user: %w", err)
+		}
+
+		log.Info("user set to %s", osConf.User)
+	}
+
+	if osConf.RlimitNoFile != 0 {
+		err = aghos.SetRlimit(osConf.RlimitNoFile)
+		err = logIfUnsupported("warning: setting rlimit", err)
+		if err != nil {
+			return fmt.Errorf("setting rlimit: %w", err)
+		}
+
+		log.Info("rlimit_nofile set to %d", osConf.RlimitNoFile)
+	}
+
+	return nil
+}
+
+func setupConfig(args options) (err error) {
 	config.DHCP.WorkDir = Context.workDir
 	config.DHCP.HTTPRegister = httpRegister
 	config.DHCP.ConfigModified = onConfigModified
 
-	Context.dhcpServer = dhcpd.Create(config.DHCP)
-	if Context.dhcpServer == nil {
-		log.Fatalf("can't initialize dhcp module")
+	Context.dhcpServer, err = dhcpd.Create(config.DHCP)
+	if Context.dhcpServer == nil || err != nil {
+		// TODO(a.garipov): There are a lot of places in the code right
+		// now which assume that the DHCP server can be nil despite this
+		// condition.  Inspect them and perhaps rewrite them to use
+		// Enabled() instead.
+		return fmt.Errorf("initing dhcp: %w", err)
 	}
 
 	Context.updater = updater.NewUpdater(&updater.Config{
@@ -206,11 +269,6 @@ func setupConfig(args options) {
 	Context.clients.Init(config.Clients, Context.dhcpServer, Context.etcHosts)
 	config.Clients = nil
 
-	if (runtime.GOOS == "linux" || runtime.GOOS == "darwin") &&
-		config.RlimitNoFile != 0 {
-		aghos.SetRlimit(config.RlimitNoFile)
-	}
-
 	// override bind host/port from the console
 	if args.bindHost != nil {
 		config.BindHost = args.bindHost
@@ -221,10 +279,61 @@ func setupConfig(args options) {
 	if len(args.pidFile) != 0 && writePIDFile(args.pidFile) {
 		Context.pidFileName = args.pidFile
 	}
+
+	return nil
+}
+
+func initWeb(args options, clientBuildFS fs.FS) (web *Web, err error) {
+	var clientFS, clientBetaFS fs.FS
+	if args.localFrontend {
+		log.Info("warning: using local frontend files")
+
+		clientFS = os.DirFS("build/static")
+		clientBetaFS = os.DirFS("build2/static")
+	} else {
+		clientFS, err = fs.Sub(clientBuildFS, "build/static")
+		if err != nil {
+			return nil, fmt.Errorf("getting embedded client subdir: %w", err)
+		}
+
+		clientBetaFS, err = fs.Sub(clientBuildFS, "build2/static")
+		if err != nil {
+			return nil, fmt.Errorf("getting embedded beta client subdir: %w", err)
+		}
+	}
+
+	webConf := webConfig{
+		firstRun:     Context.firstRun,
+		BindHost:     config.BindHost,
+		BindPort:     config.BindPort,
+		BetaBindPort: config.BetaBindPort,
+
+		ReadTimeout:       readTimeout,
+		ReadHeaderTimeout: readHdrTimeout,
+		WriteTimeout:      writeTimeout,
+
+		clientFS:     clientFS,
+		clientBetaFS: clientBetaFS,
+	}
+
+	web = CreateWeb(&webConf)
+	if web == nil {
+		return nil, fmt.Errorf("initializing web: %w", err)
+	}
+
+	return web, nil
+}
+
+func fatalOnError(err error) {
+	if err != nil {
+		log.Fatal(err)
+	}
 }
 
 // run performs configurating and starts AdGuard Home.
-func run(args options) {
+func run(args options, clientBuildFS fs.FS) {
+	var err error
+
 	// configure config filename
 	initConfigFilename(args)
 
@@ -246,19 +355,21 @@ func run(args options) {
 
 	setupContext(args)
 
-	// clients package uses dnsfilter package's static data (dnsfilter.BlockedSvcKnown()),
-	//  so we have to initialize dnsfilter's static data first,
-	//  but also avoid relying on automatic Go init() function
-	dnsfilter.InitModule()
+	err = configureOS(&config)
+	fatalOnError(err)
 
-	setupConfig(args)
+	// clients package uses filtering package's static data (filtering.BlockedSvcKnown()),
+	//  so we have to initialize filtering's static data first,
+	//  but also avoid relying on automatic Go init() function
+	filtering.InitModule()
+
+	err = setupConfig(args)
+	fatalOnError(err)
 
 	if !Context.firstRun {
 		// Save the updated config
-		err := config.write()
-		if err != nil {
-			log.Fatal(err)
-		}
+		err = config.write()
+		fatalOnError(err)
 
 		if config.DebugPProf {
 			mux := http.NewServeMux()
@@ -275,14 +386,29 @@ func run(args options) {
 		}
 	}
 
-	err := os.MkdirAll(Context.getDataDir(), 0o755)
+	err = os.MkdirAll(Context.getDataDir(), 0o755)
 	if err != nil {
 		log.Fatalf("Cannot create DNS data dir at %s: %s", Context.getDataDir(), err)
 	}
 
 	sessFilename := filepath.Join(Context.getDataDir(), "sessions.db")
 	GLMode = args.glinetMode
-	Context.auth = InitAuth(sessFilename, config.Users, config.WebSessionTTLHours*60*60)
+	var arl *authRateLimiter
+	if config.AuthAttempts > 0 && config.AuthBlockMin > 0 {
+		arl = newAuthRateLimiter(
+			time.Duration(config.AuthBlockMin)*time.Minute,
+			config.AuthAttempts,
+		)
+	} else {
+		log.Info("authratelimiter is disabled")
+	}
+
+	Context.auth = InitAuth(
+		sessFilename,
+		config.Users,
+		config.WebSessionTTLHours*60*60,
+		arl,
+	)
 	if Context.auth == nil {
 		log.Fatalf("Couldn't initialize Auth module")
 	}
@@ -293,31 +419,15 @@ func run(args options) {
 		log.Fatalf("Can't initialize TLS module")
 	}
 
-	webConf := webConfig{
-		firstRun:     Context.firstRun,
-		BindHost:     config.BindHost,
-		BindPort:     config.BindPort,
-		BetaBindPort: config.BetaBindPort,
-
-		ReadTimeout:       readTimeout,
-		ReadHeaderTimeout: readHdrTimeout,
-		WriteTimeout:      writeTimeout,
-	}
-	Context.web = CreateWeb(&webConf)
-	if Context.web == nil {
-		log.Fatalf("Can't initialize Web module")
-	}
+	Context.web, err = initWeb(args, clientBuildFS)
+	fatalOnError(err)
 
 	Context.subnetDetector, err = aghnet.NewSubnetDetector()
-	if err != nil {
-		log.Fatal(err)
-	}
+	fatalOnError(err)
 
 	if !Context.firstRun {
 		err = initDNSServer()
-		if err != nil {
-			log.Fatalf("%s", err)
-		}
+		fatalOnError(err)
 
 		Context.tls.Start()
 		Context.etcHosts.Start()
@@ -326,7 +436,7 @@ func run(args options) {
 			serr := startDNSServer()
 			if serr != nil {
 				closeDNSServer()
-				log.Fatal(serr)
+				fatalOnError(serr)
 			}
 		}()
 
@@ -393,7 +503,7 @@ Please note, that this is crucial for a server to be able to use privileged port
 You have two options:
 1. Run AdGuard Home with root privileges
 2. On Linux you can grant the CAP_NET_BIND_SERVICE capability:
-https://github.com/AdguardTeam/AdGuardHome/internal/wiki/Getting-Started#running-without-superuser`
+https://github.com/AdguardTeam/AdGuardHome/wiki/Getting-Started#running-without-superuser`
 
 		log.Fatal(msg)
 	}
@@ -408,7 +518,7 @@ Please note, that this is crucial for a DNS server to be able to use that port.`
 // Write PID to a file
 func writePIDFile(fn string) bool {
 	data := fmt.Sprintf("%d", os.Getpid())
-	err := ioutil.WriteFile(fn, []byte(data), 0o644)
+	err := os.WriteFile(fn, []byte(data), 0o644)
 	if err != nil {
 		log.Error("Couldn't write PID to file %s: %v", fn, err)
 		return false
@@ -475,6 +585,10 @@ func configureLogger(args options) {
 		log.SetLevel(log.DEBUG)
 	}
 
+	// Make sure that we see the microseconds in logs, as networking stuff
+	// can happen pretty quickly.
+	log.SetFlags(log.LstdFlags | log.Lmicroseconds)
+
 	if args.runningAsService && ls.LogFile == "" && runtime.GOOS == "windows" {
 		// When running as a Windows service, use eventlog by default if nothing else is configured
 		// Otherwise, we'll simply loose the log output
@@ -516,7 +630,7 @@ func configureLogger(args options) {
 
 // cleanup stops and resets all the modules.
 func cleanup(ctx context.Context) {
-	log.Info("Stopping AdGuard Home")
+	log.Info("stopping AdGuard Home")
 
 	if Context.web != nil {
 		Context.web.Close(ctx)
@@ -529,11 +643,14 @@ func cleanup(ctx context.Context) {
 
 	err := stopDNSServer()
 	if err != nil {
-		log.Error("Couldn't stop DNS server: %s", err)
+		log.Error("stopping dns server: %s", err)
 	}
 
 	if Context.dhcpServer != nil {
-		Context.dhcpServer.Stop()
+		err = Context.dhcpServer.Stop()
+		if err != nil {
+			log.Error("stopping dhcp server: %s", err)
+		}
 	}
 
 	Context.etcHosts.Close()
@@ -577,7 +694,28 @@ func loadOptions() options {
 	return o
 }
 
-// printHTTPAddresses prints the IP addresses which user can use to open the
+// printWebAddrs prints addresses built from proto, addr, and an appropriate
+// port.  At least one address is printed with the value of port.  If the value
+// of betaPort is 0, the second address is not printed.  The output example:
+//
+//   Go to http://127.0.0.1:80
+//   Go to http://127.0.0.1:3000 (BETA)
+//
+func printWebAddrs(proto, addr string, port, betaPort int) {
+	const (
+		hostMsg     = "Go to %s://%s"
+		hostBetaMsg = hostMsg + " (BETA)"
+	)
+
+	log.Printf(hostMsg, proto, aghnet.JoinHostPort(addr, port))
+	if betaPort == 0 {
+		return
+	}
+
+	log.Printf(hostBetaMsg, proto, aghnet.JoinHostPort(addr, config.BetaBindPort))
+}
+
+// printHTTPAddresses prints the IP addresses which user can use to access the
 // admin interface.  proto is either schemeHTTP or schemeHTTPS.
 func printHTTPAddresses(proto string) {
 	tlsConf := tlsConfigSettings{}
@@ -585,45 +723,40 @@ func printHTTPAddresses(proto string) {
 		Context.tls.WriteDiskConfig(&tlsConf)
 	}
 
-	port := strconv.Itoa(config.BindPort)
+	port := config.BindPort
 	if proto == schemeHTTPS {
-		port = strconv.Itoa(tlsConf.PortHTTPS)
+		port = tlsConf.PortHTTPS
 	}
 
-	var hostStr string
+	// TODO(e.burkov): Inspect and perhaps merge with the previous
+	// condition.
 	if proto == schemeHTTPS && tlsConf.ServerName != "" {
-		if tlsConf.PortHTTPS == 443 {
-			log.Printf("Go to https://%s", tlsConf.ServerName)
-		} else {
-			log.Printf("Go to https://%s:%s", tlsConf.ServerName, port)
-		}
-	} else if config.BindHost.IsUnspecified() {
-		log.Println("AdGuard Home is available on the following addresses:")
-		ifaces, err := aghnet.GetValidNetInterfacesForWeb()
-		if err != nil {
-			// That's weird, but we'll ignore it
-			hostStr = config.BindHost.String()
-			log.Printf("Go to %s://%s", proto, net.JoinHostPort(hostStr, port))
-			if config.BetaBindPort != 0 {
-				log.Printf("Go to %s://%s (BETA)", proto, net.JoinHostPort(hostStr, strconv.Itoa(config.BetaBindPort)))
-			}
-			return
-		}
+		printWebAddrs(proto, tlsConf.ServerName, tlsConf.PortHTTPS, 0)
 
-		for _, iface := range ifaces {
-			for _, addr := range iface.Addresses {
-				hostStr = addr.String()
-				log.Printf("Go to %s://%s", proto, net.JoinHostPort(hostStr, strconv.Itoa(config.BindPort)))
-				if config.BetaBindPort != 0 {
-					log.Printf("Go to %s://%s (BETA)", proto, net.JoinHostPort(hostStr, strconv.Itoa(config.BetaBindPort)))
-				}
-			}
-		}
-	} else {
-		hostStr = config.BindHost.String()
-		log.Printf("Go to %s://%s", proto, net.JoinHostPort(hostStr, port))
-		if config.BetaBindPort != 0 {
-			log.Printf("Go to %s://%s (BETA)", proto, net.JoinHostPort(hostStr, strconv.Itoa(config.BetaBindPort)))
+		return
+	}
+
+	bindhost := config.BindHost
+	if !bindhost.IsUnspecified() {
+		printWebAddrs(proto, bindhost.String(), port, config.BetaBindPort)
+
+		return
+	}
+
+	ifaces, err := aghnet.GetValidNetInterfacesForWeb()
+	if err != nil {
+		log.Error("web: getting iface ips: %s", err)
+		// That's weird, but we'll ignore it.
+		//
+		// TODO(e.burkov): Find out when it happens.
+		printWebAddrs(proto, bindhost.String(), port, config.BetaBindPort)
+
+		return
+	}
+
+	for _, iface := range ifaces {
+		for _, addr := range iface.Addresses {
+			printWebAddrs(proto, addr.String(), config.BindPort, config.BetaBindPort)
 		}
 	}
 }
@@ -682,7 +815,7 @@ func customDialContext(ctx context.Context, network, addr string) (conn net.Conn
 		return conn, err
 	}
 
-	return nil, agherr.Many(fmt.Sprintf("couldn't dial to %s", addr), dialErrs...)
+	return nil, errors.List(fmt.Sprintf("couldn't dial to %s", addr), dialErrs...)
 }
 
 func getHTTPProxy(_ *http.Request) (*url.URL, error) {

@@ -41,7 +41,7 @@
 - 'name': 'stats'
   'description': 'AdGuard Home statistics'
 - 'name': 'tls'
-  'description': 'AdGuard Home HTTPS/DOH/DOT settings'
+  'description': 'AdGuard Home HTTPS/DoH/DoQ/DoT settings'
 
 'paths':
   '/status':
@@ -69,7 +69,17 @@
           'content':
             'application/json':
               'schema':
-                '$ref': '#/components/schemas/DNSConfig'
+                'allOf':
+                - '$ref': '#/components/schemas/DNSConfig'
+                - 'type': 'object'
+                  'properties':
+                    'default_local_ptr_upstreams':
+                      'type': 'array'
+                      'items':
+                        'type': 'string'
+                      'example':
+                      - '192.168.168.192'
+                      - '10.0.0.10'
   '/dns_config':
     'post':
       'tags':
@@ -454,6 +464,21 @@
       - 'dhcp'
       'operationId': 'dhcpReset'
       'summary': 'Reset DHCP configuration'
+      'responses':
+        '200':
+          'description': 'OK.'
+        '501':
+          'content':
+            'application/json':
+              'schema':
+                '$ref': '#/components/schemas/Error'
+          'description': 'Not implemented (for example, on Windows).'
+  '/dhcp/reset_leases':
+    'post':
+      'tags':
+      - 'dhcp'
+      'operationId': 'dhcpResetLeases'
+      'summary': 'Reset DHCP leases'
       'responses':
         '200':
           'description': 'OK.'
@@ -1078,6 +1103,12 @@
       'responses':
         '200':
           'description': 'OK.'
+        '400':
+          'description': >
+            Invalid username or password.
+        '429':
+          'description': >
+            Out of login attempts.
   '/logout':
     'get':
       'tags':
@@ -1113,6 +1144,7 @@
         'example': 'example.org'
         'in': 'query'
         'name': 'host'
+        'required': true
         'schema':
           'type': 'string'
       - 'description': >
@@ -1147,6 +1179,7 @@
         'example': 'example.org'
         'in': 'query'
         'name': 'host'
+        'required': true
         'schema':
           'type': 'string'
       - 'description': >
@@ -1289,11 +1322,15 @@
           'type': 'integer'
         'cache_ttl_max':
           'type': 'integer'
+        'cache_optimistic':
+          'type': 'boolean'
         'upstream_mode':
           'enum':
           - ''
           - 'parallel'
           - 'fastest_addr'
+        'use_private_ptr_resolvers':
+          'type': 'boolean'
         'resolve_clients':
           'type': 'boolean'
         'local_ptr_upstreams':
@@ -1595,8 +1632,16 @@
       'description': 'Statistics configuration'
       'properties':
         'interval':
+          'description': >
+            Time period to keep the data.  `0` means that the statistics is
+            disabled.
+          'enum':
+          - 0
+          - 1
+          - 7
+          - 30
+          - 90
           'type': 'integer'
-          'description': 'Time period to keep data (1 | 7 | 30 | 90)'
     'DhcpConfig':
       'type': 'object'
       'properties':
@@ -1780,9 +1825,12 @@
         'class':
           'type': 'string'
           'example': 'IN'
-        'host':
+        'name':
           'type': 'string'
-          'example': 'example.org'
+          'example': 'xn--d1abbgf6aiiy.xn--p1ai'
+        'unicode_name':
+          'type': 'string'
+          'example': 'президент.рф'
         'type':
           'type': 'string'
           'example': 'A'
@@ -1834,7 +1882,7 @@
           'type': 'string'
         'client_id':
           'description': >
-            The client ID, if provided in DOH, DOQ, or DOT.
+            The client ID, if provided in DoH, DoQ, or DoT.
           'example': 'cli123'
           'type': 'string'
         'client_info':
@@ -1911,10 +1959,7 @@
         'disallowed_rule':
           'type': 'string'
           'description': >
-            The rule due to which the client is disallowed.  If disallowed is
-            set to true, and this string is empty, then the client IP is
-            disallowed by the "allowed IP list", that is it is not included in
-            the allowed list.
+            The rule due to which the client is allowed or blocked.
         'name':
           'description': >
             Persistent client's name or an empty string if this is a runtime
@@ -1965,8 +2010,15 @@
           'type': 'boolean'
           'description': 'Is query log enabled'
         'interval':
-          'type': 'integer'
-          'description': 'Time period to keep data (1 | 7 | 30 | 90)'
+          'description': >
+            Time period for query log rotation.
+          'type': 'number'
+          'enum':
+          - 0.25
+          - 1
+          - 7
+          - 30
+          - 90
         'anonymize_client_ip':
           'type': 'boolean'
           'description': "Anonymize clients' IP addresses"
@@ -1993,7 +2045,7 @@
         'enabled':
           'type': 'boolean'
           'example': true
-          'description': 'enabled is the encryption (DOT/DOH/HTTPS) status'
+          'description': 'enabled is the encryption (DoT/DoH/HTTPS) status'
         'server_name':
           'type': 'string'
           'example': 'example.org'
@@ -2011,12 +2063,12 @@
           'type': 'integer'
           'format': 'uint16'
           'example': 853
-          'description': 'DNS-over-TLS port. If 0, DOT will be disabled.'
+          'description': 'DNS-over-TLS port. If 0, DoT will be disabled.'
         'port_dns_over_quic':
           'type': 'integer'
           'format': 'uint16'
           'example': 784
-          'description': 'DNS-over-QUIC port. If 0, DOQ will be disabled.'
+          'description': 'DNS-over-QUIC port. If 0, DoQ will be disabled.'
         'certificate_chain':
           'type': 'string'
           'description': 'Base64 string with PEM-encoded certificates chain'
@@ -2228,6 +2280,10 @@
           'type': 'array'
           'items':
             'type': 'string'
+        'tags':
+          'items':
+            'type': 'string'
+          'type': 'array'
     'ClientAuto':
       'type': 'object'
       'description': 'Auto-Client information'
@@ -2244,6 +2300,8 @@
           'type': 'string'
           'description': 'The source of this information'
           'example': 'etc/hosts'
+        'whois_info':
+          '$ref': '#/components/schemas/WhoisInfo'
     'ClientUpdate':
       'type': 'object'
       'description': 'Client update request'
@@ -2300,17 +2358,19 @@
       'description': 'Client and host access list'
       'properties':
         'allowed_clients':
-          'description': 'Allowlist of clients.'
+          'description': >
+            The allowlist of clients: IP addresses, CIDRs, or client IDs.
           'items':
             'type': 'string'
           'type': 'array'
         'disallowed_clients':
-          'description': 'Blocklist of clients.'
+          'description': >
+            The blocklist of clients: IP addresses, CIDRs, or client IDs.
           'items':
             'type': 'string'
           'type': 'array'
         'blocked_hosts':
-          'description': 'Blocklist of hosts.'
+          'description': 'The blocklist of hosts.'
           'items':
             'type': 'string'
           'type': 'array'
@@ -2378,6 +2438,10 @@
           '$ref': '#/components/schemas/ClientsArray'
         'auto_clients':
           '$ref': '#/components/schemas/ClientsAutoArray'
+        'supported_tags':
+          'items':
+            'type': 'string'
+          'type': 'array'
     'ClientsArray':
       'type': 'array'
       'items':

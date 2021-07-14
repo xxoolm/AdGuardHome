@@ -3,7 +3,6 @@ package aghtest
 
 import (
 	"io"
-	"io/ioutil"
 	"os"
 	"testing"
 
@@ -14,7 +13,7 @@ import (
 func DiscardLogOutput(m *testing.M) {
 	// TODO(e.burkov): Refactor code and tests to not use the global mutable
 	// logger.
-	log.SetOutput(ioutil.Discard)
+	log.SetOutput(io.Discard)
 
 	os.Exit(m.Run())
 }
@@ -31,7 +30,7 @@ func ReplaceLogWriter(t *testing.T, w io.Writer) {
 
 // ReplaceLogLevel sets logging level to l and uses Cleanup method of t to
 // revert changes.
-func ReplaceLogLevel(t *testing.T, l int) {
+func ReplaceLogLevel(t *testing.T, l log.Level) {
 	switch l {
 	case log.INFO, log.DEBUG, log.ERROR:
 		// Go on.

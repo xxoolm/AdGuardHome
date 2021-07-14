@@ -6,9 +6,40 @@ import (
 	"strconv"
 	"strings"
 
-	"github.com/AdguardTeam/AdGuardHome/internal/agherr"
+	"github.com/AdguardTeam/golibs/errors"
 	"golang.org/x/net/idna"
 )
+
+// CloneIP returns a clone of an IP address.
+func CloneIP(ip net.IP) (clone net.IP) {
+	if ip != nil && len(ip) == 0 {
+		return net.IP{}
+	}
+
+	return append(clone, ip...)
+}
+
+// CloneMAC returns a clone of a MAC address.
+func CloneMAC(mac net.HardwareAddr) (clone net.HardwareAddr) {
+	if mac != nil && len(mac) == 0 {
+		return net.HardwareAddr{}
+	}
+
+	return append(clone, mac...)
+}
+
+// IPFromAddr returns an IP address from addr.  If addr is neither
+// a *net.TCPAddr nor a *net.UDPAddr, it returns nil.
+func IPFromAddr(addr net.Addr) (ip net.IP) {
+	switch addr := addr.(type) {
+	case *net.TCPAddr:
+		return addr.IP
+	case *net.UDPAddr:
+		return addr.IP
+	}
+
+	return nil
+}
 
 // IsValidHostOuterRune returns true if r is a valid initial or final rune for
 // a hostname label.
@@ -16,6 +47,12 @@ func IsValidHostOuterRune(r rune) (ok bool) {
 	return (r >= 'a' && r <= 'z') ||
 		(r >= 'A' && r <= 'Z') ||
 		(r >= '0' && r <= '9')
+}
+
+// JoinHostPort is a convinient wrapper for net.JoinHostPort with port of type
+// int.
+func JoinHostPort(host string, port int) (hostport string) {
+	return net.JoinHostPort(host, strconv.Itoa(port))
 }
 
 // isValidHostRune returns true if r is a valid rune for a hostname label.
@@ -26,11 +63,11 @@ func isValidHostRune(r rune) (ok bool) {
 // ValidateHardwareAddress returns an error if hwa is not a valid EUI-48,
 // EUI-64, or 20-octet InfiniBand link-layer address.
 func ValidateHardwareAddress(hwa net.HardwareAddr) (err error) {
-	defer agherr.Annotate("validating hardware address %q: %w", &err, hwa)
+	defer func() { err = errors.Annotate(err, "validating hardware address %q: %w", hwa) }()
 
 	switch l := len(hwa); l {
 	case 0:
-		return agherr.Error("address is empty")
+		return errors.Error("address is empty")
 	case 6, 8, 20:
 		return nil
 	default:
@@ -42,38 +79,38 @@ func ValidateHardwareAddress(hwa net.HardwareAddr) (err error) {
 // according to RFC 1035.
 const maxDomainLabelLen = 63
 
-// maxDomainNameLen is the maximum allowed length of a full domain name
+// MaxDomainNameLen is the maximum allowed length of a full domain name
 // according to RFC 1035.
 //
 // See https://stackoverflow.com/a/32294443/1892060.
-const maxDomainNameLen = 253
-
-const invalidCharMsg = "invalid char %q at index %d in %q"
+const MaxDomainNameLen = 253
 
 // ValidateDomainNameLabel returns an error if label is not a valid label of
 // a domain name.
 func ValidateDomainNameLabel(label string) (err error) {
+	defer func() { err = errors.Annotate(err, "validating label %q: %w", label) }()
+
 	l := len(label)
 	if l > maxDomainLabelLen {
-		return fmt.Errorf("%q is too long, max: %d", label, maxDomainLabelLen)
+		return fmt.Errorf("label is too long, max: %d", maxDomainLabelLen)
 	} else if l == 0 {
-		return agherr.Error("label is empty")
+		return errors.Error("label is empty")
 	}
 
 	if r := label[0]; !IsValidHostOuterRune(rune(r)) {
-		return fmt.Errorf(invalidCharMsg, r, 0, label)
+		return fmt.Errorf("invalid char %q at index %d", r, 0)
 	} else if l == 1 {
 		return nil
 	}
 
 	for i, r := range label[1 : l-1] {
 		if !isValidHostRune(r) {
-			return fmt.Errorf(invalidCharMsg, r, i+1, label)
+			return fmt.Errorf("invalid char %q at index %d", r, i+1)
 		}
 	}
 
 	if r := label[l-1]; !IsValidHostOuterRune(rune(r)) {
-		return fmt.Errorf(invalidCharMsg, r, l-1, label)
+		return fmt.Errorf("invalid char %q at index %d", r, l-1)
 	}
 
 	return nil
@@ -87,6 +124,8 @@ func ValidateDomainNameLabel(label string) (err error) {
 // TODO(a.garipov): After making sure that this works correctly, port this into
 // module golibs.
 func ValidateDomainName(name string) (err error) {
+	defer func() { err = errors.Annotate(err, "validating domain name %q: %w", name) }()
+
 	name, err = idna.ToASCII(name)
 	if err != nil {
 		return err
@@ -94,9 +133,9 @@ func ValidateDomainName(name string) (err error) {
 
 	l := len(name)
 	if l == 0 {
-		return agherr.Error("domain name is empty")
-	} else if l > maxDomainNameLen {
-		return fmt.Errorf("%q is too long, max: %d", name, maxDomainNameLen)
+		return errors.Error("domain name is empty")
+	} else if l > MaxDomainNameLen {
+		return fmt.Errorf("too long, max: %d", MaxDomainNameLen)
 	}
 
 	labels := strings.Split(name, ".")
@@ -112,7 +151,7 @@ func ValidateDomainName(name string) (err error) {
 
 // The maximum lengths of generated hostnames for different IP versions.
 const (
-	ipv4HostnameMaxLen = len("192-168-100-10-")
+	ipv4HostnameMaxLen = len("192-168-100-100")
 	ipv6HostnameMaxLen = len("ff80-f076-0000-0000-0000-0000-0000-0010")
 )
 

@@ -1,25 +1,30 @@
+//go:build darwin
 // +build darwin
 
 package aghnet
 
 import (
-	"errors"
 	"fmt"
-	"io/ioutil"
+	"os"
 	"regexp"
 	"strings"
 
 	"github.com/AdguardTeam/AdGuardHome/internal/aghos"
+	"github.com/AdguardTeam/golibs/errors"
 )
 
-// hardwarePortInfo - information obtained using MacOS networksetup
-// about the current state of the internet connection
+// hardwarePortInfo contains information about the current state of the internet
+// connection obtained from macOS networksetup.
 type hardwarePortInfo struct {
 	name      string
 	ip        string
 	subnet    string
 	gatewayIP string
 	static    bool
+}
+
+func canBindPrivilegedPorts() (can bool, err error) {
+	return aghos.HaveAdminRights()
 }
 
 func ifaceHasStaticIP(ifaceName string) (bool, error) {
@@ -81,7 +86,7 @@ func getHardwarePortInfo(hardwarePort string) (hardwarePortInfo, error) {
 
 	match := re.FindStringSubmatch(out)
 	if len(match) == 0 {
-		return h, errors.New("could not find hardware port info")
+		return h, errors.Error("could not find hardware port info")
 	}
 
 	h.name = hardwarePort
@@ -103,7 +108,7 @@ func ifaceSetStaticIP(ifaceName string) (err error) {
 	}
 
 	if portInfo.static {
-		return errors.New("IP address is already static")
+		return errors.Error("IP address is already static")
 	}
 
 	dnsAddrs, err := getEtcResolvConfServers()
@@ -140,7 +145,7 @@ func ifaceSetStaticIP(ifaceName string) (err error) {
 // getEtcResolvConfServers returns a list of nameservers configured in
 // /etc/resolv.conf.
 func getEtcResolvConfServers() ([]string, error) {
-	body, err := ioutil.ReadFile("/etc/resolv.conf")
+	body, err := os.ReadFile("/etc/resolv.conf")
 	if err != nil {
 		return nil, err
 	}
@@ -149,7 +154,7 @@ func getEtcResolvConfServers() ([]string, error) {
 
 	matches := re.FindAllStringSubmatch(string(body), -1)
 	if len(matches) == 0 {
-		return nil, errors.New("found no DNS servers in /etc/resolv.conf")
+		return nil, errors.Error("found no DNS servers in /etc/resolv.conf")
 	}
 
 	addrs := make([]string, 0)

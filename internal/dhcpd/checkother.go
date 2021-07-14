@@ -1,3 +1,4 @@
+//go:build aix || darwin || dragonfly || freebsd || linux || netbsd || openbsd || solaris
 // +build aix darwin dragonfly freebsd linux netbsd openbsd solaris
 
 package dhcpd
@@ -10,6 +11,9 @@ import (
 	"runtime"
 	"time"
 
+	"github.com/AdguardTeam/AdGuardHome/internal/aghnet"
+	"github.com/AdguardTeam/AdGuardHome/internal/aghos"
+	"github.com/AdguardTeam/golibs/errors"
 	"github.com/AdguardTeam/golibs/log"
 	"github.com/insomniacslk/dhcp/dhcpv4"
 	"github.com/insomniacslk/dhcp/dhcpv4/nclient4"
@@ -37,11 +41,11 @@ func CheckIfOtherDHCPServersPresentV4(ifaceName string) (ok bool, err error) {
 	// TODO(a.garipov): Find out what this is about.  Perhaps this
 	// information is outdated or at least incomplete.
 	if runtime.GOOS == "darwin" {
-		return false, fmt.Errorf("can't find DHCP server: not supported on macOS")
+		return false, aghos.Unsupported("CheckIfOtherDHCPServersPresentV4")
 	}
 
 	srcIP := ifaceIPNet[0]
-	src := net.JoinHostPort(srcIP.String(), "68")
+	src := aghnet.JoinHostPort(srcIP.String(), 68)
 	dst := "255.255.255.255:67"
 
 	hostname, _ := os.Hostname()
@@ -76,7 +80,7 @@ func CheckIfOtherDHCPServersPresentV4(ifaceName string) (ok bool, err error) {
 		return false, fmt.Errorf("couldn't listen on :68: %w", err)
 	}
 	if c != nil {
-		defer c.Close()
+		defer func() { err = errors.WithDeferred(err, c.Close()) }()
 	}
 
 	// send to 255.255.255.255:67
@@ -172,7 +176,7 @@ func CheckIfOtherDHCPServersPresentV6(ifaceName string) (ok bool, err error) {
 	}
 
 	srcIP := ifaceIPNet[0]
-	src := net.JoinHostPort(srcIP.String(), "546")
+	src := aghnet.JoinHostPort(srcIP.String(), 546)
 	dst := "[ff02::1:2]:547"
 
 	req, err := dhcpv6.NewSolicit(iface.HardwareAddr)
@@ -200,7 +204,7 @@ func CheckIfOtherDHCPServersPresentV6(ifaceName string) (ok bool, err error) {
 		return false, fmt.Errorf("dhcpv6: Couldn't listen on :546: %w", err)
 	}
 	if c != nil {
-		defer c.Close()
+		defer func() { err = errors.WithDeferred(err, c.Close()) }()
 	}
 
 	_, err = c.WriteTo(req.ToBytes(), dstAddr)

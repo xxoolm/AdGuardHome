@@ -5,7 +5,7 @@ import (
 	"testing"
 	"time"
 
-	"github.com/AdguardTeam/AdGuardHome/internal/dnsfilter"
+	"github.com/AdguardTeam/AdGuardHome/internal/filtering"
 	"github.com/AdguardTeam/AdGuardHome/internal/querylog"
 	"github.com/AdguardTeam/AdGuardHome/internal/stats"
 	"github.com/AdguardTeam/dnsproxy/proxy"
@@ -46,13 +46,13 @@ func (l *testStats) Update(e stats.Entry) {
 func TestProcessQueryLogsAndStats(t *testing.T) {
 	testCases := []struct {
 		name           string
-		proto          string
+		proto          proxy.Proto
 		addr           net.Addr
 		clientID       string
 		wantLogProto   querylog.ClientProto
 		wantStatClient string
 		wantCode       resultCode
-		reason         dnsfilter.Reason
+		reason         filtering.Reason
 		wantStatResult stats.Result
 	}{{
 		name:           "success_udp",
@@ -62,47 +62,47 @@ func TestProcessQueryLogsAndStats(t *testing.T) {
 		wantLogProto:   "",
 		wantStatClient: "1.2.3.4",
 		wantCode:       resultCodeSuccess,
-		reason:         dnsfilter.NotFilteredNotFound,
+		reason:         filtering.NotFilteredNotFound,
 		wantStatResult: stats.RNotFiltered,
 	}, {
 		name:           "success_tls_client_id",
 		proto:          proxy.ProtoTLS,
 		addr:           &net.TCPAddr{IP: net.IP{1, 2, 3, 4}, Port: 1234},
 		clientID:       "cli42",
-		wantLogProto:   querylog.ClientProtoDOT,
+		wantLogProto:   querylog.ClientProtoDoT,
 		wantStatClient: "cli42",
 		wantCode:       resultCodeSuccess,
-		reason:         dnsfilter.NotFilteredNotFound,
+		reason:         filtering.NotFilteredNotFound,
 		wantStatResult: stats.RNotFiltered,
 	}, {
 		name:           "success_tls",
 		proto:          proxy.ProtoTLS,
 		addr:           &net.TCPAddr{IP: net.IP{1, 2, 3, 4}, Port: 1234},
 		clientID:       "",
-		wantLogProto:   querylog.ClientProtoDOT,
+		wantLogProto:   querylog.ClientProtoDoT,
 		wantStatClient: "1.2.3.4",
 		wantCode:       resultCodeSuccess,
-		reason:         dnsfilter.NotFilteredNotFound,
+		reason:         filtering.NotFilteredNotFound,
 		wantStatResult: stats.RNotFiltered,
 	}, {
 		name:           "success_quic",
 		proto:          proxy.ProtoQUIC,
 		addr:           &net.UDPAddr{IP: net.IP{1, 2, 3, 4}, Port: 1234},
 		clientID:       "",
-		wantLogProto:   querylog.ClientProtoDOQ,
+		wantLogProto:   querylog.ClientProtoDoQ,
 		wantStatClient: "1.2.3.4",
 		wantCode:       resultCodeSuccess,
-		reason:         dnsfilter.NotFilteredNotFound,
+		reason:         filtering.NotFilteredNotFound,
 		wantStatResult: stats.RNotFiltered,
 	}, {
 		name:           "success_https",
 		proto:          proxy.ProtoHTTPS,
 		addr:           &net.TCPAddr{IP: net.IP{1, 2, 3, 4}, Port: 1234},
 		clientID:       "",
-		wantLogProto:   querylog.ClientProtoDOH,
+		wantLogProto:   querylog.ClientProtoDoH,
 		wantStatClient: "1.2.3.4",
 		wantCode:       resultCodeSuccess,
-		reason:         dnsfilter.NotFilteredNotFound,
+		reason:         filtering.NotFilteredNotFound,
 		wantStatResult: stats.RNotFiltered,
 	}, {
 		name:           "success_dnscrypt",
@@ -112,7 +112,7 @@ func TestProcessQueryLogsAndStats(t *testing.T) {
 		wantLogProto:   querylog.ClientProtoDNSCrypt,
 		wantStatClient: "1.2.3.4",
 		wantCode:       resultCodeSuccess,
-		reason:         dnsfilter.NotFilteredNotFound,
+		reason:         filtering.NotFilteredNotFound,
 		wantStatResult: stats.RNotFiltered,
 	}, {
 		name:           "success_udp_filtered",
@@ -122,7 +122,7 @@ func TestProcessQueryLogsAndStats(t *testing.T) {
 		wantLogProto:   "",
 		wantStatClient: "1.2.3.4",
 		wantCode:       resultCodeSuccess,
-		reason:         dnsfilter.FilteredBlockList,
+		reason:         filtering.FilteredBlockList,
 		wantStatResult: stats.RFiltered,
 	}, {
 		name:           "success_udp_sb",
@@ -132,7 +132,7 @@ func TestProcessQueryLogsAndStats(t *testing.T) {
 		wantLogProto:   "",
 		wantStatClient: "1.2.3.4",
 		wantCode:       resultCodeSuccess,
-		reason:         dnsfilter.FilteredSafeBrowsing,
+		reason:         filtering.FilteredSafeBrowsing,
 		wantStatResult: stats.RSafeBrowsing,
 	}, {
 		name:           "success_udp_ss",
@@ -142,7 +142,7 @@ func TestProcessQueryLogsAndStats(t *testing.T) {
 		wantLogProto:   "",
 		wantStatClient: "1.2.3.4",
 		wantCode:       resultCodeSuccess,
-		reason:         dnsfilter.FilteredSafeSearch,
+		reason:         filtering.FilteredSafeSearch,
 		wantStatResult: stats.RSafeSearch,
 	}, {
 		name:           "success_udp_pc",
@@ -152,11 +152,11 @@ func TestProcessQueryLogsAndStats(t *testing.T) {
 		wantLogProto:   "",
 		wantStatClient: "1.2.3.4",
 		wantCode:       resultCodeSuccess,
-		reason:         dnsfilter.FilteredParental,
+		reason:         filtering.FilteredParental,
 		wantStatResult: stats.RParental,
 	}}
 
-	ups, err := upstream.AddressToUpstream("1.1.1.1", upstream.Options{})
+	ups, err := upstream.AddressToUpstream("1.1.1.1", nil)
 	require.Nil(t, err)
 
 	for _, tc := range testCases {
@@ -183,7 +183,7 @@ func TestProcessQueryLogsAndStats(t *testing.T) {
 				},
 				proxyCtx:  pctx,
 				startTime: time.Now(),
-				result: &dnsfilter.Result{
+				result: &filtering.Result{
 					Reason: tc.reason,
 				},
 				clientID: tc.clientID,

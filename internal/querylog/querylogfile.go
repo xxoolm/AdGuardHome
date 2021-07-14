@@ -3,10 +3,10 @@ package querylog
 import (
 	"bytes"
 	"encoding/json"
-	"errors"
 	"os"
 	"time"
 
+	"github.com/AdguardTeam/golibs/errors"
 	"github.com/AdguardTeam/golibs/log"
 )
 
@@ -39,7 +39,7 @@ func (l *queryLog) flushLogBuffer(fullFlush bool) error {
 }
 
 // flushToFile saves the specified log entries to the query log file
-func (l *queryLog) flushToFile(buffer []*logEntry) error {
+func (l *queryLog) flushToFile(buffer []*logEntry) (err error) {
 	if len(buffer) == 0 {
 		log.Debug("querylog: there's nothing to write to a file")
 		return nil
@@ -49,9 +49,10 @@ func (l *queryLog) flushToFile(buffer []*logEntry) error {
 	var b bytes.Buffer
 	e := json.NewEncoder(&b)
 	for _, entry := range buffer {
-		err := e.Encode(entry)
+		err = e.Encode(entry)
 		if err != nil {
 			log.Error("Failed to marshal entry: %s", err)
+
 			return err
 		}
 	}
@@ -59,7 +60,6 @@ func (l *queryLog) flushToFile(buffer []*logEntry) error {
 	elapsed := time.Since(start)
 	log.Debug("%d elements serialized via json in %v: %d kB, %v/entry, %v/entry", len(buffer), elapsed, b.Len()/1024, float64(b.Len())/float64(len(buffer)), elapsed/time.Duration(len(buffer)))
 
-	var err error
 	var zb bytes.Buffer
 	filename := l.logFile
 	zb = b
@@ -71,7 +71,7 @@ func (l *queryLog) flushToFile(buffer []*logEntry) error {
 		log.Error("failed to create file \"%s\": %s", filename, err)
 		return err
 	}
-	defer f.Close()
+	defer func() { err = errors.WithDeferred(err, f.Close()) }()
 
 	n, err := f.Write(zb.Bytes())
 	if err != nil {
@@ -104,38 +104,52 @@ func (l *queryLog) rotate() error {
 	return nil
 }
 
-func (l *queryLog) readFileFirstTimeValue() int64 {
-	f, err := os.Open(l.logFile)
+func (l *queryLog) readFileFirstTimeValue() (first time.Time, err error) {
+	var f *os.File
+	f, err = os.Open(l.logFile)
 	if err != nil {
-		return -1
+		return time.Time{}, err
 	}
-	defer f.Close()
 
-	buf := make([]byte, 500)
-	r, err := f.Read(buf)
+	defer func() { err = errors.WithDeferred(err, f.Close()) }()
+
+	buf := make([]byte, 512)
+	var r int
+	r, err = f.Read(buf)
 	if err != nil {
-		return -1
+		return time.Time{}, err
 	}
-	buf = buf[:r]
 
-	val := readJSONValue(string(buf), `"T":"`)
+	val := readJSONValue(string(buf[:r]), `"T":"`)
 	t, err := time.Parse(time.RFC3339Nano, val)
 	if err != nil {
-		return -1
+		return time.Time{}, err
 	}
 
 	log.Debug("querylog: the oldest log entry: %s", val)
-	return t.Unix()
+
+	return t, nil
 }
 
 func (l *queryLog) periodicRotate() {
-	intervalSeconds := uint64(l.conf.RotationIvl) * 24 * 60 * 60
+	defer log.OnPanic("querylog: rotating")
+
+	var err error
 	for {
-		oldest := l.readFileFirstTimeValue()
-		if uint64(oldest)+intervalSeconds <= uint64(time.Now().Unix()) {
-			_ = l.rotate()
+		var oldest time.Time
+		oldest, err = l.readFileFirstTimeValue()
+		if err != nil {
+			log.Debug("%s", err)
 		}
 
+		if oldest.Add(l.conf.RotationIvl).After(time.Now()) {
+			err = l.rotate()
+			if err != nil {
+				log.Debug("%s", err)
+			}
+		}
+
+		// What?
 		time.Sleep(24 * time.Hour)
 	}
 }

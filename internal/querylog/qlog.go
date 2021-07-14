@@ -2,7 +2,6 @@
 package querylog
 
 import (
-	"errors"
 	"fmt"
 	"net"
 	"os"
@@ -10,7 +9,8 @@ import (
 	"sync"
 	"time"
 
-	"github.com/AdguardTeam/AdGuardHome/internal/dnsfilter"
+	"github.com/AdguardTeam/AdGuardHome/internal/filtering"
+	"github.com/AdguardTeam/golibs/errors"
 	"github.com/AdguardTeam/golibs/log"
 	"github.com/miekg/dns"
 )
@@ -42,9 +42,9 @@ type ClientProto string
 
 // Client protocol names.
 const (
-	ClientProtoDOH      ClientProto = "doh"
-	ClientProtoDOQ      ClientProto = "doq"
-	ClientProtoDOT      ClientProto = "dot"
+	ClientProtoDoH      ClientProto = "doh"
+	ClientProtoDoQ      ClientProto = "doq"
+	ClientProtoDoT      ClientProto = "dot"
 	ClientProtoDNSCrypt ClientProto = "dnscrypt"
 	ClientProtoPlain    ClientProto = ""
 )
@@ -54,9 +54,9 @@ const (
 func NewClientProto(s string) (cp ClientProto, err error) {
 	switch cp = ClientProto(s); cp {
 	case
-		ClientProtoDOH,
-		ClientProtoDOQ,
-		ClientProtoDOT,
+		ClientProtoDoH,
+		ClientProtoDoQ,
+		ClientProtoDoT,
 		ClientProtoDNSCrypt,
 		ClientProtoPlain:
 
@@ -84,7 +84,7 @@ type logEntry struct {
 	Answer     []byte `json:",omitempty"` // sometimes empty answers happen like binerdunt.top or rev2.globalrootservers.net
 	OrigAnswer []byte `json:",omitempty"`
 
-	Result   dnsfilter.Result
+	Result   filtering.Result
 	Elapsed  time.Duration
 	Upstream string `json:",omitempty"` // if empty, means it was cached
 }
@@ -100,8 +100,17 @@ func (l *queryLog) Close() {
 	_ = l.flushLogBuffer(true)
 }
 
-func checkInterval(days uint32) bool {
-	return days == 1 || days == 7 || days == 30 || days == 90
+func checkInterval(ivl time.Duration) (ok bool) {
+	// The constants for possible values of query log's rotation interval.
+	const (
+		quarterDay  = 6 * time.Hour
+		day         = 24 * time.Hour
+		week        = day * 7
+		month       = day * 30
+		threeMonths = day * 90
+	)
+
+	return ivl == quarterDay || ivl == day || ivl == week || ivl == month || ivl == threeMonths
 }
 
 func (l *queryLog) WriteDiskConfig(c *Config) {
@@ -147,7 +156,7 @@ func (l *queryLog) Add(params AddParams) {
 	}
 
 	if params.Result == nil {
-		params.Result = &dnsfilter.Result{}
+		params.Result = &filtering.Result{}
 	}
 
 	now := time.Now()

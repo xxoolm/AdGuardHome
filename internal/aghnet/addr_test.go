@@ -9,6 +9,34 @@ import (
 	"github.com/stretchr/testify/require"
 )
 
+func TestCloneIP(t *testing.T) {
+	assert.Equal(t, net.IP(nil), CloneIP(nil))
+	assert.Equal(t, net.IP{}, CloneIP(net.IP{}))
+
+	ip := net.IP{1, 2, 3, 4}
+	clone := CloneIP(ip)
+	assert.Equal(t, ip, clone)
+	assert.NotSame(t, &ip[0], &clone[0])
+}
+
+func TestCloneMAC(t *testing.T) {
+	assert.Equal(t, net.HardwareAddr(nil), CloneMAC(nil))
+	assert.Equal(t, net.HardwareAddr{}, CloneMAC(net.HardwareAddr{}))
+
+	mac := net.HardwareAddr{0x12, 0x34, 0x56, 0x78, 0x9A, 0xBC}
+	clone := CloneMAC(mac)
+	assert.Equal(t, mac, clone)
+	assert.NotSame(t, &mac[0], &clone[0])
+}
+
+func TestIPFromAddr(t *testing.T) {
+	ip := net.IP{1, 2, 3, 4}
+	assert.Equal(t, net.IP(nil), IPFromAddr(nil))
+	assert.Equal(t, net.IP(nil), IPFromAddr(struct{ net.Addr }{}))
+	assert.Equal(t, ip, IPFromAddr(&net.TCPAddr{IP: ip}))
+	assert.Equal(t, ip, IPFromAddr(&net.UDPAddr{IP: ip}))
+}
+
 func TestValidateHardwareAddress(t *testing.T) {
 	testCases := []struct {
 		name       string
@@ -58,6 +86,14 @@ func TestValidateHardwareAddress(t *testing.T) {
 	}
 }
 
+func TestJoinHostPort(t *testing.T) {
+	assert.Equal(t, ":0", JoinHostPort("", 0))
+	assert.Equal(t, "host:12345", JoinHostPort("host", 12345))
+	assert.Equal(t, "1.2.3.4:12345", JoinHostPort("1.2.3.4", 12345))
+	assert.Equal(t, "[1234::5678]:12345", JoinHostPort("1234::5678", 12345))
+	assert.Equal(t, "[1234::5678%lo]:12345", JoinHostPort("1234::5678%lo", 12345))
+}
+
 func repeatStr(b *strings.Builder, s string, n int) {
 	for i := 0; i < n; i++ {
 		_, _ = b.WriteString(s)
@@ -95,40 +131,46 @@ func TestValidateDomainName(t *testing.T) {
 	}, {
 		name:       "empty",
 		in:         "",
-		wantErrMsg: `domain name is empty`,
+		wantErrMsg: `validating domain name "": domain name is empty`,
 	}, {
 		name: "bad_symbol",
 		in:   "!!!",
-		wantErrMsg: `invalid domain name label at index 0: ` +
-			`invalid char '!' at index 0 in "!!!"`,
+		wantErrMsg: `validating domain name "!!!": invalid domain name label at index 0: ` +
+			`validating label "!!!": invalid char '!' at index 0`,
 	}, {
 		name:       "bad_length",
 		in:         longDomainName,
-		wantErrMsg: `"` + longDomainName + `" is too long, max: 253`,
+		wantErrMsg: `validating domain name "` + longDomainName + `": too long, max: 253`,
 	}, {
 		name: "bad_label_length",
 		in:   longLabelDomainName,
-		wantErrMsg: `invalid domain name label at index 0: "` + longLabel +
-			`" is too long, max: 63`,
+		wantErrMsg: `validating domain name "` + longLabelDomainName + `": ` +
+			`invalid domain name label at index 0: validating label "` + longLabel +
+			`": label is too long, max: 63`,
 	}, {
-		name:       "bad_label_empty",
-		in:         "example..com",
-		wantErrMsg: `invalid domain name label at index 1: label is empty`,
+		name: "bad_label_empty",
+		in:   "example..com",
+		wantErrMsg: `validating domain name "example..com": ` +
+			`invalid domain name label at index 1: ` +
+			`validating label "": label is empty`,
 	}, {
 		name: "bad_label_first_symbol",
 		in:   "example.-aa.com",
-		wantErrMsg: `invalid domain name label at index 1:` +
-			` invalid char '-' at index 0 in "-aa"`,
+		wantErrMsg: `validating domain name "example.-aa.com": ` +
+			`invalid domain name label at index 1: ` +
+			`validating label "-aa": invalid char '-' at index 0`,
 	}, {
 		name: "bad_label_last_symbol",
 		in:   "example-.aa.com",
-		wantErrMsg: `invalid domain name label at index 0:` +
-			` invalid char '-' at index 7 in "example-"`,
+		wantErrMsg: `validating domain name "example-.aa.com": ` +
+			`invalid domain name label at index 0: ` +
+			`validating label "example-": invalid char '-' at index 7`,
 	}, {
 		name: "bad_label_symbol",
 		in:   "example.a!!!.com",
-		wantErrMsg: `invalid domain name label at index 1:` +
-			` invalid char '!' at index 1 in "a!!!"`,
+		wantErrMsg: `validating domain name "example.a!!!.com": ` +
+			`invalid domain name label at index 1: ` +
+			`validating label "a!!!": invalid char '!' at index 1`,
 	}}
 
 	for _, tc := range testCases {

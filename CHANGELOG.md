@@ -10,11 +10,167 @@ and this project adheres to
 ## [Unreleased]
 
 <!--
-## [v0.106.0] - 2021-05-01
+## [v0.107.0] - 2021-08-03 (APPROX.)
 -->
 
 ### Added
 
+- Optimistic cache ([#2145]).
+- New possible value of `6h` for `querylog_interval` setting ([#2504]).
+- Blocking access using client IDs ([#2624], [#3162]).
+- `source` directives support in `/etc/network/interfaces` on Linux ([#3257]).
+- RFC 9000 support in DNS-over-QUIC.
+- Completely disabling statistics by setting the statistics interval to zero
+  ([#2141]).
+- The ability to completely purge DHCP leases ([#1691]).
+- Settable timeouts for querying the upstream servers ([#2280]).
+- Configuration file parameters to change group and user ID on startup on Unix
+  ([#2763]).
+- Experimental OpenBSD support for AMD64 and 64-bit ARM CPUs ([#2439]).
+- Support for custom port in DNS-over-HTTPS profiles for Apple's devices
+  ([#3172]).
+- `darwin/arm64` support ([#2443]).
+- `freebsd/arm64` support ([#2441]).
+- Output of the default addresses of the upstreams used for resolving PTRs for
+  private addresses ([#3136]).
+- Detection and handling of recurrent PTR requests for locally-served addresses
+  ([#3185]).
+- The ability to completely disable reverse DNS resolving of IPs from
+  locally-served networks ([#3184]).
+- New flag `--local-frontend` to serve dynamically changeable frontend files
+  from disk as opposed to the ones that were compiled into the binary.
+
+### Changed
+
+- `querylog_interval` setting is now formatted in hours.
+- Query log search now supports internationalized domains ([#3012]).
+- Internationalized domains are now shown decoded in the query log with the
+  original encoded version shown in request details ([#3013]).
+- When /etc/hosts-type rules have several IPs for one host, all IPs are now
+  returned instead of only the first one ([#1381]).
+- The setting `rlimit_nofile` is now in the `os` block of the configuration
+  file, together with the new `group` and `user` settings ([#2763]).
+- Permissions on filter files are now `0o644` instead of `0o600` ([#3198]).
+
+### Deprecated
+
+- Go 1.16 support.  v0.108.0 will require at least Go 1.17 to build.
+
+### Fixed
+
+- Domain name letter case mismatches in DNS rewrites ([#3351]).
+- Conflicts between IPv4 and IPv6 DNS rewrites ([#3343]).
+- Letter case mismatches in `CNAME` filtering ([#3335]).
+- Occasional breakages on network errors with DNS-over-HTTP upstreams ([#3217]).
+- Errors when setting static IP on Linux ([#3257]).
+- Treatment of domain names and FQDNs in custom rules with `$dnsrewrite` that
+  use the `PTR` type ([#3256]).
+- Redundant hostname generating while loading static leases with empty hostname
+  ([#3166]).
+- Domain name case in responses ([#3194]).
+- Custom upstreams selection for clients with client IDs in DNS-over-TLS and
+  DNS-over-HTTP ([#3186]).
+- Incorrect client-based filtering applying logic ([#2875]).
+
+### Removed
+
+- Go 1.15 support.
+
+[#1381]: https://github.com/AdguardTeam/AdGuardHome/issues/1381
+[#1691]: https://github.com/AdguardTeam/AdGuardHome/issues/1691
+[#2141]: https://github.com/AdguardTeam/AdGuardHome/issues/2141
+[#2145]: https://github.com/AdguardTeam/AdGuardHome/issues/2145
+[#2280]: https://github.com/AdguardTeam/AdGuardHome/issues/2280
+[#2439]: https://github.com/AdguardTeam/AdGuardHome/issues/2439
+[#2441]: https://github.com/AdguardTeam/AdGuardHome/issues/2441
+[#2443]: https://github.com/AdguardTeam/AdGuardHome/issues/2443
+[#2504]: https://github.com/AdguardTeam/AdGuardHome/issues/2504
+[#2624]: https://github.com/AdguardTeam/AdGuardHome/issues/2624
+[#2763]: https://github.com/AdguardTeam/AdGuardHome/issues/2763
+[#3012]: https://github.com/AdguardTeam/AdGuardHome/issues/3012
+[#3013]: https://github.com/AdguardTeam/AdGuardHome/issues/3013
+[#3136]: https://github.com/AdguardTeam/AdGuardHome/issues/3136
+[#3162]: https://github.com/AdguardTeam/AdGuardHome/issues/3162
+[#3166]: https://github.com/AdguardTeam/AdGuardHome/issues/3166
+[#3172]: https://github.com/AdguardTeam/AdGuardHome/issues/3172
+[#3184]: https://github.com/AdguardTeam/AdGuardHome/issues/3184
+[#3185]: https://github.com/AdguardTeam/AdGuardHome/issues/3185
+[#3186]: https://github.com/AdguardTeam/AdGuardHome/issues/3186
+[#3194]: https://github.com/AdguardTeam/AdGuardHome/issues/3194
+[#3198]: https://github.com/AdguardTeam/AdGuardHome/issues/3198
+[#3217]: https://github.com/AdguardTeam/AdGuardHome/issues/3217
+[#3256]: https://github.com/AdguardTeam/AdGuardHome/issues/3256
+[#3257]: https://github.com/AdguardTeam/AdGuardHome/issues/3257
+[#3335]: https://github.com/AdguardTeam/AdGuardHome/issues/3335
+[#3343]: https://github.com/AdguardTeam/AdGuardHome/issues/3343
+[#3351]: https://github.com/AdguardTeam/AdGuardHome/issues/3351
+
+
+
+## [v0.106.3] - 2021-05-19
+
+### Added
+
+- Support for reinstall (`-r`) and uninstall (`-u`) flags in the installation
+  script ([#2462]).
+- Support for DHCP `DECLINE` and `RELEASE` message types ([#3053]).
+
+### Changed
+
+- Add microseconds to log output.
+
+### Fixed
+
+- Intermittent "Warning: ID mismatch" errors ([#3087]).
+- Error when using installation script on some ARMv7 devices ([#2542]).
+- DHCP leases validation ([#3107], [#3127]).
+- Local PTR request recursion in Docker containers ([#3064]).
+- Ignoring client-specific filtering settings when filtering is disabled in
+  general settings ([#2875]).
+- Disallowed domains are now case-insensitive ([#3115]).
+
+[#2462]: https://github.com/AdguardTeam/AdGuardHome/issues/2462
+[#2542]: https://github.com/AdguardTeam/AdGuardHome/issues/2542
+[#2875]: https://github.com/AdguardTeam/AdGuardHome/issues/2875
+[#3053]: https://github.com/AdguardTeam/AdGuardHome/issues/3053
+[#3064]: https://github.com/AdguardTeam/AdGuardHome/issues/3064
+[#3107]: https://github.com/AdguardTeam/AdGuardHome/issues/3107
+[#3115]: https://github.com/AdguardTeam/AdGuardHome/issues/3115
+[#3127]: https://github.com/AdguardTeam/AdGuardHome/issues/3127
+
+
+
+## [v0.106.2] - 2021-05-06
+
+### Fixed
+
+- Uniqueness validation for dynamic DHCP leases ([#3056]).
+
+[#3056]: https://github.com/AdguardTeam/AdGuardHome/issues/3056
+
+
+
+## [v0.106.1] - 2021-04-30
+
+### Fixed
+
+- Local domain name handling when the DHCP server is disabled ([#3028]).
+- Normalization of previously-saved invalid static DHCP leases ([#3027]).
+- Validation of IPv6 addresses with zones in system resolvers ([#3022]).
+
+[#3022]: https://github.com/AdguardTeam/AdGuardHome/issues/3022
+[#3027]: https://github.com/AdguardTeam/AdGuardHome/issues/3027
+[#3028]: https://github.com/AdguardTeam/AdGuardHome/issues/3028
+
+
+
+## [v0.106.0] - 2021-04-28
+
+### Added
+
+- The ability to block user for login after configurable number of unsuccessful
+  attempts for configurable time ([#2826]).
+- `$denyallow` modifier for filters ([#2923]).
 - Hostname uniqueness validation in the DHCP server ([#2952]).
 - Hostname generating for DHCP clients which don't provide their own ([#2723]).
 - New flag `--no-etc-hosts` to disable client domain name lookups in the
@@ -52,6 +208,9 @@ and this project adheres to
 
 ### Fixed
 
+- Multiple answers for `$dnsrewrite` rule matching requests with repeating
+  patterns in it ([#2981]).
+- Root server resolving when custom upstreams for hosts are specified ([#2994]).
 - Inconsistent resolving of DHCP clients when the DHCP server is disabled
   ([#2934]).
 - Comment handling in clients' custom upstreams ([#2947]).
@@ -77,11 +236,13 @@ and this project adheres to
 [#2704]: https://github.com/AdguardTeam/AdGuardHome/issues/2704
 [#2723]: https://github.com/AdguardTeam/AdGuardHome/issues/2723
 [#2824]: https://github.com/AdguardTeam/AdGuardHome/issues/2824
+[#2826]: https://github.com/AdguardTeam/AdGuardHome/issues/2826
 [#2828]: https://github.com/AdguardTeam/AdGuardHome/issues/2828
 [#2835]: https://github.com/AdguardTeam/AdGuardHome/issues/2835
 [#2838]: https://github.com/AdguardTeam/AdGuardHome/issues/2838
 [#2843]: https://github.com/AdguardTeam/AdGuardHome/issues/2843
 [#2889]: https://github.com/AdguardTeam/AdGuardHome/issues/2889
+[#2923]: https://github.com/AdguardTeam/AdGuardHome/issues/2923
 [#2927]: https://github.com/AdguardTeam/AdGuardHome/issues/2927
 [#2934]: https://github.com/AdguardTeam/AdGuardHome/issues/2934
 [#2945]: https://github.com/AdguardTeam/AdGuardHome/issues/2945
@@ -89,6 +250,8 @@ and this project adheres to
 [#2952]: https://github.com/AdguardTeam/AdGuardHome/issues/2952
 [#2954]: https://github.com/AdguardTeam/AdGuardHome/issues/2954
 [#2961]: https://github.com/AdguardTeam/AdGuardHome/issues/2961
+[#2981]: https://github.com/AdguardTeam/AdGuardHome/issues/2981
+[#2994]: https://github.com/AdguardTeam/AdGuardHome/issues/2994
 
 [doq-draft-02]: https://tools.ietf.org/html/draft-ietf-dprive-dnsoquic-02
 
@@ -304,11 +467,15 @@ and this project adheres to
 
 
 <!--
-[Unreleased]: https://github.com/AdguardTeam/AdGuardHome/compare/v0.106.0...HEAD
-[v0.106.0]:   https://github.com/AdguardTeam/AdGuardHome/compare/v0.105.2...v0.106.0
+[Unreleased]: https://github.com/AdguardTeam/AdGuardHome/compare/v0.107.0...HEAD
+[v0.107.0]:   https://github.com/AdguardTeam/AdGuardHome/compare/v0.106.3...v0.107.0
 -->
 
-[Unreleased]: https://github.com/AdguardTeam/AdGuardHome/compare/v0.105.2...HEAD
+[Unreleased]: https://github.com/AdguardTeam/AdGuardHome/compare/v0.106.3...HEAD
+[v0.106.3]:   https://github.com/AdguardTeam/AdGuardHome/compare/v0.106.2...v0.106.3
+[v0.106.2]:   https://github.com/AdguardTeam/AdGuardHome/compare/v0.106.1...v0.106.2
+[v0.106.1]:   https://github.com/AdguardTeam/AdGuardHome/compare/v0.106.0...v0.106.1
+[v0.106.0]:   https://github.com/AdguardTeam/AdGuardHome/compare/v0.105.2...v0.106.0
 [v0.105.2]:   https://github.com/AdguardTeam/AdGuardHome/compare/v0.105.1...v0.105.2
 [v0.105.1]:   https://github.com/AdguardTeam/AdGuardHome/compare/v0.105.0...v0.105.1
 [v0.105.0]:   https://github.com/AdguardTeam/AdGuardHome/compare/v0.104.3...v0.105.0

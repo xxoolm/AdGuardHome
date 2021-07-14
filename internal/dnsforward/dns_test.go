@@ -6,7 +6,7 @@ import (
 
 	"github.com/AdguardTeam/AdGuardHome/internal/aghnet"
 	"github.com/AdguardTeam/AdGuardHome/internal/aghtest"
-	"github.com/AdguardTeam/AdGuardHome/internal/dnsfilter"
+	"github.com/AdguardTeam/AdGuardHome/internal/filtering"
 	"github.com/AdguardTeam/dnsproxy/proxy"
 	"github.com/AdguardTeam/dnsproxy/upstream"
 	"github.com/miekg/dns"
@@ -90,6 +90,7 @@ func TestServer_ProcessInternalHosts_localRestriction(t *testing.T) {
 	for _, tc := range testCases {
 		t.Run(tc.name, func(t *testing.T) {
 			s := &Server{
+				dhcpServer:        &testDHCP{},
 				localDomainSuffix: defaultLocalDomainSuffix,
 				tableHostToIP: hostToIPTable{
 					"example": knownIP,
@@ -201,6 +202,7 @@ func TestServer_ProcessInternalHosts(t *testing.T) {
 	for _, tc := range testCases {
 		t.Run(tc.name, func(t *testing.T) {
 			s := &Server{
+				dhcpServer:        &testDHCP{},
 				localDomainSuffix: tc.suffix,
 				tableHostToIP: hostToIPTable{
 					"example": knownIP,
@@ -258,14 +260,14 @@ func TestServer_ProcessInternalHosts(t *testing.T) {
 	}
 }
 
-func TestLocalRestriction(t *testing.T) {
+func TestServer_ProcessRestrictLocal(t *testing.T) {
 	ups := &aghtest.TestUpstream{
 		Reverse: map[string][]string{
 			"251.252.253.254.in-addr.arpa.": {"host1.example.net."},
 			"1.1.168.192.in-addr.arpa.":     {"some.local-client."},
 		},
 	}
-	s := createTestServer(t, &dnsfilter.Config{}, ServerConfig{
+	s := createTestServer(t, &filtering.Config{}, ServerConfig{
 		UDPListenAddrs: []*net.UDPAddr{{}},
 		TCPListenAddrs: []*net.TCPAddr{{}},
 	}, ups)
@@ -316,14 +318,79 @@ func TestLocalRestriction(t *testing.T) {
 				IP: tc.cliIP,
 			},
 		}
+
 		t.Run(tc.name, func(t *testing.T) {
 			err = s.handleDNSRequest(nil, pctx)
-			require.Nil(t, err)
+			require.NoError(t, err)
 			require.NotNil(t, pctx.Res)
 			require.Len(t, pctx.Res.Answer, tc.wantLen)
+
 			if tc.wantLen > 0 {
-				assert.Equal(t, tc.want, pctx.Res.Answer[0].Header().Name)
+				assert.Equal(t, tc.want, pctx.Res.Answer[0].(*dns.PTR).Ptr)
 			}
 		})
 	}
+}
+
+func TestServer_ProcessLocalPTR_usingResolvers(t *testing.T) {
+	const locDomain = "some.local."
+	const reqAddr = "1.1.168.192.in-addr.arpa."
+
+	s := createTestServer(t, &filtering.Config{}, ServerConfig{
+		UDPListenAddrs: []*net.UDPAddr{{}},
+		TCPListenAddrs: []*net.TCPAddr{{}},
+	}, &aghtest.TestUpstream{
+		Reverse: map[string][]string{
+			reqAddr: {locDomain},
+		},
+	})
+
+	var proxyCtx *proxy.DNSContext
+	var dnsCtx *dnsContext
+	setup := func(use bool) {
+		proxyCtx = &proxy.DNSContext{
+			Addr: &net.TCPAddr{
+				IP: net.IP{127, 0, 0, 1},
+			},
+			Req: createTestMessageWithType(reqAddr, dns.TypePTR),
+		}
+		dnsCtx = &dnsContext{
+			proxyCtx:        proxyCtx,
+			unreversedReqIP: net.IP{192, 168, 1, 1},
+		}
+		s.conf.UsePrivateRDNS = use
+	}
+
+	t.Run("enabled", func(t *testing.T) {
+		setup(true)
+
+		rc := s.processLocalPTR(dnsCtx)
+		require.Equal(t, resultCodeSuccess, rc)
+		require.NotEmpty(t, proxyCtx.Res.Answer)
+
+		assert.Equal(t, locDomain, proxyCtx.Res.Answer[0].(*dns.PTR).Ptr)
+	})
+
+	t.Run("disabled", func(t *testing.T) {
+		setup(false)
+
+		rc := s.processLocalPTR(dnsCtx)
+		require.Equal(t, resultCodeFinish, rc)
+		require.Empty(t, proxyCtx.Res.Answer)
+	})
+}
+
+func TestIPStringFromAddr(t *testing.T) {
+	t.Run("not_nil", func(t *testing.T) {
+		addr := net.UDPAddr{
+			IP:   net.ParseIP("1:2:3::4"),
+			Port: 12345,
+			Zone: "eth0",
+		}
+		assert.Equal(t, ipStringFromAddr(&addr), addr.IP.String())
+	})
+
+	t.Run("nil", func(t *testing.T) {
+		assert.Empty(t, ipStringFromAddr(nil))
+	})
 }

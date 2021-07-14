@@ -1,20 +1,20 @@
 package home
 
 import (
-	"errors"
 	"fmt"
-	"io/ioutil"
 	"net"
 	"os"
 	"path/filepath"
 	"sync"
+	"time"
 
 	"github.com/AdguardTeam/AdGuardHome/internal/dhcpd"
-	"github.com/AdguardTeam/AdGuardHome/internal/dnsfilter"
 	"github.com/AdguardTeam/AdGuardHome/internal/dnsforward"
+	"github.com/AdguardTeam/AdGuardHome/internal/filtering"
 	"github.com/AdguardTeam/AdGuardHome/internal/querylog"
 	"github.com/AdguardTeam/AdGuardHome/internal/stats"
 	"github.com/AdguardTeam/AdGuardHome/internal/version"
+	"github.com/AdguardTeam/golibs/errors"
 	"github.com/AdguardTeam/golibs/log"
 	"github.com/google/renameio/maybe"
 	yaml "gopkg.in/yaml.v2"
@@ -36,6 +36,19 @@ type logSettings struct {
 	Verbose       bool   `yaml:"verbose"`         // If true, verbose logging is enabled
 }
 
+// osConfig contains OS-related configuration.
+type osConfig struct {
+	// Group is the name of the group which AdGuard Home must switch to on
+	// startup.  Empty string means no switching.
+	Group string `yaml:"group"`
+	// User is the name of the user which AdGuard Home must switch to on
+	// startup.  Empty string means no switching.
+	User string `yaml:"user"`
+	// RlimitNoFile is the maximum number of opened fd's per process.  Zero
+	// means use the default value.
+	RlimitNoFile uint64 `yaml:"rlimit_nofile"`
+}
+
 // configuration is loaded from YAML
 // field ordering is important -- yaml fields will mirror ordering from here
 type configuration struct {
@@ -47,10 +60,15 @@ type configuration struct {
 	BindPort     int    `yaml:"bind_port"`      // BindPort is the port the HTTP server
 	BetaBindPort int    `yaml:"beta_bind_port"` // BetaBindPort is the port for new client
 	Users        []User `yaml:"users"`          // Users that can access HTTP server
-	ProxyURL     string `yaml:"http_proxy"`     // Proxy address for our HTTP client
-	Language     string `yaml:"language"`       // two-letter ISO 639-1 language code
-	RlimitNoFile uint   `yaml:"rlimit_nofile"`  // Maximum number of opened fd's per process (0: default)
-	DebugPProf   bool   `yaml:"debug_pprof"`    // Enable pprof HTTP server on port 6060
+	// AuthAttempts is the maximum number of failed login attempts a user
+	// can do before being blocked.
+	AuthAttempts uint `yaml:"auth_attempts"`
+	// AuthBlockMin is the duration, in minutes, of the block of new login
+	// attempts after AuthAttempts unsuccessful login attempts.
+	AuthBlockMin uint   `yaml:"block_auth_min"`
+	ProxyURL     string `yaml:"http_proxy"`  // Proxy address for our HTTP client
+	Language     string `yaml:"language"`    // two-letter ISO 639-1 language code
+	DebugPProf   bool   `yaml:"debug_pprof"` // Enable pprof HTTP server on port 6060
 
 	// TTL for a web session (in hours)
 	// An active session is automatically refreshed once a day.
@@ -70,6 +88,8 @@ type configuration struct {
 
 	logSettings `yaml:",inline"`
 
+	OSConfig *osConfig `yaml:"os"`
+
 	sync.RWMutex `yaml:"-"`
 
 	SchemaVersion int `yaml:"schema_version"` // keeping last so that users will be less tempted to change it -- used when upgrading between versions
@@ -83,17 +103,21 @@ type dnsConfig struct {
 	// time interval for statistics (in days)
 	StatsInterval uint32 `yaml:"statistics_interval"`
 
-	QueryLogEnabled     bool   `yaml:"querylog_enabled"`      // if true, query log is enabled
-	QueryLogFileEnabled bool   `yaml:"querylog_file_enabled"` // if true, query log will be written to a file
-	QueryLogInterval    uint32 `yaml:"querylog_interval"`     // time interval for query log (in days)
-	QueryLogMemSize     uint32 `yaml:"querylog_size_memory"`  // number of entries kept in memory before they are flushed to disk
-	AnonymizeClientIP   bool   `yaml:"anonymize_client_ip"`   // anonymize clients' IP addresses in logs and stats
+	QueryLogEnabled     bool `yaml:"querylog_enabled"`      // if true, query log is enabled
+	QueryLogFileEnabled bool `yaml:"querylog_file_enabled"` // if true, query log will be written to a file
+	// QueryLogInterval is the interval for query log's files rotation.
+	QueryLogInterval  Duration `yaml:"querylog_interval"`
+	QueryLogMemSize   uint32   `yaml:"querylog_size_memory"` // number of entries kept in memory before they are flushed to disk
+	AnonymizeClientIP bool     `yaml:"anonymize_client_ip"`  // anonymize clients' IP addresses in logs and stats
 
 	dnsforward.FilteringConfig `yaml:",inline"`
 
 	FilteringEnabled           bool             `yaml:"filtering_enabled"`       // whether or not use filter lists
 	FiltersUpdateIntervalHours uint32           `yaml:"filters_update_interval"` // time period to update filters (in hours)
-	DnsfilterConf              dnsfilter.Config `yaml:",inline"`
+	DnsfilterConf              filtering.Config `yaml:",inline"`
+
+	// UpstreamTimeout is the timeout for querying upstream servers.
+	UpstreamTimeout Duration `yaml:"upstream_timeout"`
 
 	// LocalDomainName is the domain name used for known internal hosts.
 	// For example, a machine called "myhost" can be addressed as
@@ -103,17 +127,21 @@ type dnsConfig struct {
 	// ResolveClients enables and disables resolving clients with RDNS.
 	ResolveClients bool `yaml:"resolve_clients"`
 
+	// UsePrivateRDNS defines if the PTR requests for unknown addresses from
+	// locally-served networks should be resolved via private PTR resolvers.
+	UsePrivateRDNS bool `yaml:"use_private_ptr_resolvers"`
+
 	// LocalPTRResolvers is the slice of addresses to be used as upstreams
 	// for PTR queries for locally-served networks.
 	LocalPTRResolvers []string `yaml:"local_ptr_upstreams"`
 }
 
 type tlsConfigSettings struct {
-	Enabled         bool   `yaml:"enabled" json:"enabled"`                                 // Enabled is the encryption (DOT/DOH/HTTPS) status
+	Enabled         bool   `yaml:"enabled" json:"enabled"`                                 // Enabled is the encryption (DoT/DoH/HTTPS) status
 	ServerName      string `yaml:"server_name" json:"server_name,omitempty"`               // ServerName is the hostname of your HTTPS/TLS server
 	ForceHTTPS      bool   `yaml:"force_https" json:"force_https,omitempty"`               // ForceHTTPS: if true, forces HTTP->HTTPS redirect
 	PortHTTPS       int    `yaml:"port_https" json:"port_https,omitempty"`                 // HTTPS port. If 0, HTTPS will be disabled
-	PortDNSOverTLS  int    `yaml:"port_dns_over_tls" json:"port_dns_over_tls,omitempty"`   // DNS-over-TLS port. If 0, DOT will be disabled
+	PortDNSOverTLS  int    `yaml:"port_dns_over_tls" json:"port_dns_over_tls,omitempty"`   // DNS-over-TLS port. If 0, DoT will be disabled
 	PortDNSOverQUIC int    `yaml:"port_dns_over_quic" json:"port_dns_over_quic,omitempty"` // DNS-over-QUIC port. If 0, DoQ will be disabled
 
 	// PortDNSCrypt is the port for DNSCrypt requests.  If it's zero,
@@ -126,8 +154,8 @@ type tlsConfigSettings struct {
 	// https://github.com/ameshkov/dnscrypt.
 	DNSCryptConfigFile string `yaml:"dnscrypt_config_file" json:"dnscrypt_config_file"`
 
-	// Allow DOH queries via unencrypted HTTP (e.g. for reverse proxying)
-	AllowUnencryptedDOH bool `yaml:"allow_unencrypted_doh" json:"allow_unencrypted_doh"`
+	// Allow DoH queries via unencrypted HTTP (e.g. for reverse proxying)
+	AllowUnencryptedDoH bool `yaml:"allow_unencrypted_doh" json:"allow_unencrypted_doh"`
 
 	dnsforward.TLSConfig `yaml:",inline" json:",inline"`
 }
@@ -137,12 +165,14 @@ var config = configuration{
 	BindPort:     3000,
 	BetaBindPort: 0,
 	BindHost:     net.IP{0, 0, 0, 0},
+	AuthAttempts: 5,
+	AuthBlockMin: 15,
 	DNS: dnsConfig{
 		BindHosts:     []net.IP{{0, 0, 0, 0}},
 		Port:          53,
 		StatsInterval: 1,
 		FilteringConfig: dnsforward.FilteringConfig{
-			ProtectionEnabled:  true,      // whether or not use any of dnsfilter features
+			ProtectionEnabled:  true,      // whether or not use any of filtering features
 			BlockingMode:       "default", // mode how to answer filtered requests
 			BlockedResponseTTL: 10,        // in seconds
 			Ratelimit:          20,
@@ -157,8 +187,10 @@ var config = configuration{
 		},
 		FilteringEnabled:           true, // whether or not use filter lists
 		FiltersUpdateIntervalHours: 24,
+		UpstreamTimeout:            Duration{Duration: dnsforward.DefaultTimeout},
 		LocalDomainName:            "lan",
 		ResolveClients:             true,
+		UsePrivateRDNS:             true,
 	},
 	TLS: tlsConfigSettings{
 		PortHTTPS:       443,
@@ -172,6 +204,7 @@ var config = configuration{
 		LogMaxSize:    100,
 		LogMaxAge:     3,
 	},
+	OSConfig:      &osConfig{},
 	SchemaVersion: currentSchemaVersion,
 }
 
@@ -181,7 +214,7 @@ func initConfig() {
 
 	config.DNS.QueryLogEnabled = true
 	config.DNS.QueryLogFileEnabled = true
-	config.DNS.QueryLogInterval = 90
+	config.DNS.QueryLogInterval = Duration{Duration: 90 * 24 * time.Hour}
 	config.DNS.QueryLogMemSize = 1000
 
 	config.DNS.CacheSize = 4 * 1024 * 1024
@@ -249,6 +282,10 @@ func parseConfig() error {
 		config.DNS.FiltersUpdateIntervalHours = 24
 	}
 
+	if config.DNS.UpstreamTimeout.Duration == 0 {
+		config.DNS.UpstreamTimeout = Duration{Duration: dnsforward.DefaultTimeout}
+	}
+
 	return nil
 }
 
@@ -259,7 +296,7 @@ func readConfigFile() ([]byte, error) {
 	}
 
 	configFile := config.getConfigFilename()
-	d, err := ioutil.ReadFile(configFile)
+	d, err := os.ReadFile(configFile)
 	if err != nil {
 		return nil, fmt.Errorf("couldn't read config file %s: %w", configFile, err)
 	}
@@ -293,13 +330,13 @@ func (c *configuration) write() error {
 		Context.queryLog.WriteDiskConfig(&dc)
 		config.DNS.QueryLogEnabled = dc.Enabled
 		config.DNS.QueryLogFileEnabled = dc.FileEnabled
-		config.DNS.QueryLogInterval = dc.RotationIvl
+		config.DNS.QueryLogInterval = Duration{Duration: dc.RotationIvl}
 		config.DNS.QueryLogMemSize = dc.MemSize
 		config.DNS.AnonymizeClientIP = dc.AnonymizeClientIP
 	}
 
 	if Context.dnsFilter != nil {
-		c := dnsfilter.Config{}
+		c := filtering.Config{}
 		Context.dnsFilter.WriteDiskConfig(&c)
 		config.DNS.DnsfilterConf = c
 	}
@@ -307,9 +344,11 @@ func (c *configuration) write() error {
 	if s := Context.dnsServer; s != nil {
 		c := dnsforward.FilteringConfig{}
 		s.WriteDiskConfig(&c)
-		config.DNS.FilteringConfig = c
-
-		config.DNS.LocalPTRResolvers, config.DNS.ResolveClients = s.RDNSSettings()
+		dns := &config.DNS
+		dns.FilteringConfig = c
+		dns.LocalPTRResolvers,
+			dns.ResolveClients,
+			dns.UsePrivateRDNS = s.RDNSSettings()
 	}
 
 	if Context.dhcpServer != nil {

@@ -6,8 +6,8 @@ import (
 	"path/filepath"
 	"time"
 
-	"github.com/AdguardTeam/AdGuardHome/internal/agherr"
-	"github.com/AdguardTeam/AdGuardHome/internal/dnsfilter"
+	"github.com/AdguardTeam/AdGuardHome/internal/filtering"
+	"github.com/AdguardTeam/golibs/errors"
 	"github.com/AdguardTeam/golibs/log"
 	"github.com/miekg/dns"
 )
@@ -41,10 +41,17 @@ type Config struct {
 	// BaseDir is the base directory for log files.
 	BaseDir string
 
-	// RotationIvl is the interval for log rotation, in days.  After that
-	// period, the old log file will be renamed, NOT deleted, so the actual
-	// log retention time is twice the interval.
-	RotationIvl uint32
+	// RotationIvl is the interval for log rotation.  After that period, the
+	// old log file will be renamed, NOT deleted, so the actual log
+	// retention time is twice the interval.  The value must be one of:
+	//
+	//         6 * time.Hour
+	//        24 * time.Hour
+	//    7 * 24 * time.Hour
+	//   30 * 24 * time.Hour
+	//   90 * 24 * time.Hour
+	//
+	RotationIvl time.Duration
 
 	// MemSize is the number of entries kept in a memory buffer before they
 	// are flushed to disk.
@@ -66,7 +73,7 @@ type AddParams struct {
 	Question    *dns.Msg
 	Answer      *dns.Msg          // The response we sent to the client (optional)
 	OrigAnswer  *dns.Msg          // The response from an upstream server (optional)
-	Result      *dnsfilter.Result // Filtering result (optional)
+	Result      *filtering.Result // Filtering result (optional)
 	Elapsed     time.Duration     // Time spent for processing the request
 	ClientID    string
 	ClientIP    net.IP
@@ -78,13 +85,13 @@ type AddParams struct {
 func (p *AddParams) validate() (err error) {
 	switch {
 	case p.Question == nil:
-		return agherr.Error("question is nil")
+		return errors.Error("question is nil")
 	case len(p.Question.Question) != 1:
-		return agherr.Error("more than one question")
+		return errors.Error("more than one question")
 	case len(p.Question.Question[0].Name) == 0:
-		return agherr.Error("no host in question")
+		return errors.Error("no host in question")
 	case p.ClientIP == nil:
-		return agherr.Error("no client ip")
+		return errors.Error("no client ip")
 	default:
 		return nil
 	}
@@ -118,7 +125,7 @@ func newQueryLog(conf Config) (l *queryLog) {
 			"querylog: warning: unsupported rotation interval %d, setting to 1 day",
 			conf.RotationIvl,
 		)
-		l.conf.RotationIvl = 1
+		l.conf.RotationIvl = 24 * time.Hour
 	}
 
 	return l

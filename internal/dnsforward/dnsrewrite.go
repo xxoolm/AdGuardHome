@@ -4,9 +4,9 @@ import (
 	"fmt"
 	"net"
 
-	"github.com/AdguardTeam/AdGuardHome/internal/agherr"
-	"github.com/AdguardTeam/AdGuardHome/internal/dnsfilter"
+	"github.com/AdguardTeam/AdGuardHome/internal/filtering"
 	"github.com/AdguardTeam/dnsproxy/proxy"
+	"github.com/AdguardTeam/golibs/errors"
 	"github.com/AdguardTeam/golibs/log"
 	"github.com/AdguardTeam/urlfilter/rules"
 	"github.com/miekg/dns"
@@ -79,11 +79,11 @@ func (s *Server) filterDNSRewriteResponse(req *dns.Msg, rr rules.RRType, v rules
 
 // filterDNSRewrite handles dnsrewrite filters.  It constructs a DNS
 // response and sets it into d.Res.
-func (s *Server) filterDNSRewrite(req *dns.Msg, res dnsfilter.Result, d *proxy.DNSContext) (err error) {
+func (s *Server) filterDNSRewrite(req *dns.Msg, res filtering.Result, d *proxy.DNSContext) (err error) {
 	resp := s.makeResponse(req)
 	dnsrr := res.DNSRewriteResult
 	if dnsrr == nil {
-		return agherr.Error("no dns rewrite rule content")
+		return errors.Error("no dns rewrite rule content")
 	}
 
 	resp.Rcode = dnsrr.RCode
@@ -94,7 +94,7 @@ func (s *Server) filterDNSRewrite(req *dns.Msg, res dnsfilter.Result, d *proxy.D
 	}
 
 	if dnsrr.Response == nil {
-		return agherr.Error("no dns rewrite rule responses")
+		return errors.Error("no dns rewrite rule responses")
 	}
 
 	rr := req.Question[0].Qtype

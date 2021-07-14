@@ -3,7 +3,7 @@ package home
 import (
 	"encoding/json"
 	"fmt"
-	"io/ioutil"
+	"io"
 	"net"
 	"net/http"
 	"net/url"
@@ -226,7 +226,7 @@ func (f *Filtering) handleFilteringSetURL(w http.ResponseWriter, r *http.Request
 
 func (f *Filtering) handleFilteringSetRules(w http.ResponseWriter, r *http.Request) {
 	// This use of ReadAll is safe, because request's body is now limited.
-	body, err := ioutil.ReadAll(r.Body)
+	body, err := io.ReadAll(r.Body)
 	if err != nil {
 		httpError(w, http.StatusBadRequest, "Failed to read request body: %s", err)
 		return
@@ -351,8 +351,14 @@ func (f *Filtering) handleFilteringConfig(w http.ResponseWriter, r *http.Request
 		return
 	}
 
-	config.DNS.FilteringEnabled = req.Enabled
-	config.DNS.FiltersUpdateIntervalHours = req.Interval
+	func() {
+		config.Lock()
+		defer config.Unlock()
+
+		config.DNS.FilteringEnabled = req.Enabled
+		config.DNS.FiltersUpdateIntervalHours = req.Interval
+	}()
+
 	onConfigModified()
 	enableFilters(true)
 }
@@ -364,7 +370,6 @@ type checkHostRespRule struct {
 
 type checkHostResp struct {
 	Reason string `json:"reason"`
-
 	// FilterID is the ID of the rule's filter list.
 	//
 	// Deprecated: Use Rules[*].FilterListID.

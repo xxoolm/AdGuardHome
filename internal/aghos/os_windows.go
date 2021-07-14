@@ -1,19 +1,16 @@
+//go:build windows
 // +build windows
 
 package aghos
 
 import (
-	"fmt"
 	"syscall"
 
 	"golang.org/x/sys/windows"
 )
 
-func canBindPrivilegedPorts() (can bool, err error) {
-	return HaveAdminRights()
-}
-
-func setRlimit(val uint) {
+func setRlimit(val uint64) (err error) {
+	return Unsupported("setrlimit")
 }
 
 func haveAdminRights() (bool, error) {
@@ -38,7 +35,7 @@ func haveAdminRights() (bool, error) {
 }
 
 func sendProcessSignal(pid int, sig syscall.Signal) error {
-	return fmt.Errorf("not supported on Windows")
+	return Unsupported("kill")
 }
 
 func isOpenWrt() (ok bool) {

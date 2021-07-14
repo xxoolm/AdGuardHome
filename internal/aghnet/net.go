@@ -3,7 +3,6 @@ package aghnet
 
 import (
 	"encoding/json"
-	"errors"
 	"fmt"
 	"net"
 	"os"
@@ -14,14 +13,14 @@ import (
 	"syscall"
 	"time"
 
-	"github.com/AdguardTeam/AdGuardHome/internal/agherr"
 	"github.com/AdguardTeam/AdGuardHome/internal/aghstrings"
+	"github.com/AdguardTeam/golibs/errors"
 	"github.com/AdguardTeam/golibs/log"
 )
 
 // ErrNoStaticIPInfo is returned by IfaceHasStaticIP when no information about
 // the IP being static is available.
-const ErrNoStaticIPInfo agherr.Error = "no information about static ip"
+const ErrNoStaticIPInfo errors.Error = "no information about static ip"
 
 // IfaceHasStaticIP checks if interface is configured to have static IP address.
 // If it can't give a definitive answer, it returns false and an error for which
@@ -72,6 +71,12 @@ func CanBindPort(port int) (can bool, err error) {
 	return true, nil
 }
 
+// CanBindPrivilegedPorts checks if current process can bind to privileged
+// ports.
+func CanBindPrivilegedPorts() (can bool, err error) {
+	return canBindPrivilegedPorts()
+}
+
 // NetInterface represents an entry of network interfaces map.
 type NetInterface struct {
 	MTU          int              `json:"mtu"`
@@ -84,17 +89,17 @@ type NetInterface struct {
 	Subnets []*net.IPNet `json:"-"`
 }
 
-// MarshalJSON implements the json.Marshaler interface for *NetInterface.
-func (iface *NetInterface) MarshalJSON() ([]byte, error) {
+// MarshalJSON implements the json.Marshaler interface for NetInterface.
+func (iface NetInterface) MarshalJSON() ([]byte, error) {
 	type netInterface NetInterface
 	return json.Marshal(&struct {
 		HardwareAddr string `json:"hardware_address"`
 		Flags        string `json:"flags"`
-		*netInterface
+		netInterface
 	}{
 		HardwareAddr: iface.HardwareAddr.String(),
 		Flags:        iface.Flags.String(),
-		netInterface: (*netInterface)(iface),
+		netInterface: netInterface(iface),
 	})
 }
 
@@ -106,7 +111,7 @@ func GetValidNetInterfacesForWeb() ([]*NetInterface, error) {
 		return nil, fmt.Errorf("couldn't get interfaces: %w", err)
 	}
 	if len(ifaces) == 0 {
-		return nil, errors.New("couldn't find any legible interface")
+		return nil, errors.Error("couldn't find any legible interface")
 	}
 
 	var netInterfaces []*NetInterface
@@ -187,7 +192,7 @@ func GetSubnet(ifaceName string) *net.IPNet {
 
 // CheckPortAvailable - check if TCP port is available
 func CheckPortAvailable(host net.IP, port int) error {
-	ln, err := net.Listen("tcp", net.JoinHostPort(host.String(), strconv.Itoa(port)))
+	ln, err := net.Listen("tcp", JoinHostPort(host.String(), port))
 	if err != nil {
 		return err
 	}
@@ -201,7 +206,7 @@ func CheckPortAvailable(host net.IP, port int) error {
 
 // CheckPacketPortAvailable - check if UDP port is available
 func CheckPacketPortAvailable(host net.IP, port int) error {
-	ln, err := net.ListenPacket("udp", net.JoinHostPort(host.String(), strconv.Itoa(port)))
+	ln, err := net.ListenPacket("udp", JoinHostPort(host.String(), port))
 	if err != nil {
 		return err
 	}

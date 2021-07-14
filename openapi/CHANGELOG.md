@@ -2,9 +2,86 @@
 
 <!-- TODO(a.garipov): Reformat in accordance with the KeepAChangelog spec. -->
 
+## v0.107: API changes
+
+### The new field `"cache_optimistic"` in DNS configuration
+
+* The new optional field `"cache_optimistic"` in `POST /control/dns_config`
+  method makes AdGuard Home use or not use the optimistic cache mechanism.
+
+* The new field `"cache_optimistic"` in `GET /control/dns_info` method is true
+  if AdGuard Home uses the optimistic cache mechanism.
+
+### New possible value of `"interval"` field in `QueryLogConfig`
+
+* The value of `"interval"` field in `POST /control/querylog_config` and `GET
+  /control/querylog_info` methods could now take the value of `0.25`.  It's
+  equal to 6 hours.
+
+* All the possible values of `"interval"` field are enumerated.
+
+* The type of `"interval"` field is now `number` instead of `integer`.
+
+### Client IDs in Access Settings
+
+* The `POST /control/access/set` HTTP API now accepts client IDs in
+  `"allowed_clients"` and `"disallowed_clients"` fields.
+
+### The new field `"unicode_name"` in `DNSQuestion`
+
+* The new optional field `"unicode_name"` is the Unicode representation of
+  question's domain name.  It is only presented if the original question's
+  domain name is an IDN.
+
+### Documentation fix of `DNSQuestion`
+
+* Previously incorrectly named field `"host"` in `DNSQuestion` is now named
+  `"name"`.
+
+###  Disabling Statistics
+
+* The `POST /control/stats_config` HTTP API allows disabling statistics by
+  setting `"interval"` to `0`.
+
+### `POST /control/dhcp/reset_leases`
+
+* The new `POST /control/dhcp/reset_leases` HTTP API allows removing all leases
+  from the DHCP server's database without erasing its configuration.
+
+### The parameter `"host"` in `GET /apple/*.mobileconfig` is now required.
+
+* The parameter `"host"` in `GET` requests for `/apple/doh.mobileconfig` and
+  `/apple/doh.mobileconfig` is now required to prevent unexpected server name's
+  value.
+
+### The new field `"default_local_ptr_upstreams"` in `GET /control/dns_info`
+
+* The new optional field `"default_local_ptr_upstreams"` is the list of IP
+  addresses AdGuard Home would use by default to resolve PTR request for
+  addresses from locally-served networks.
+
+### The field `"use_private_ptr_resolvers"` in DNS configuration
+
+* The new optional field  `"use_private_ptr_resolvers"` of `"DNSConfig"`
+  specifies if the DNS server should use `"local_ptr_upstreams"` at all.
+
 ## v0.106: API changes
 
-## New `"private_upstream"` field in `POST /test_upstream_dns`
+### The field `"supported_tags"` in `GET /control/clients`
+
+* Previously undocumented field `"supported_tags"` in the response is now
+  documented.
+
+### The field `"whois_info"` in `GET /control/clients`
+
+* Objects in the `"auto_clients"` array now have the `"whois_info"` field.
+
+### New response code in `POST /control/login`
+
+* `429` is returned when user is out of login attempts.  It adds the
+  `Retry-After` header with the number of seconds of block left in it.
+
+### New `"private_upstream"` field in `POST /test_upstream_dns`
 
 * The new optional field `"private_upstream"` of `UpstreamConfig` contains the
   upstream servers for resolving locally-served ip addresses to be checked.

@@ -143,6 +143,9 @@ const Form = ({
     const upstream_dns = useSelector((store) => store.form[FORM_NAME.UPSTREAM].values.upstream_dns);
     const processingTestUpstream = useSelector((state) => state.settings.processingTestUpstream);
     const processingSetConfig = useSelector((state) => state.dnsConfig.processingSetConfig);
+    const defaultLocalPtrUpstreams = useSelector(
+        (state) => state.dnsConfig.default_local_ptr_upstreams,
+    );
 
     const handleUpstreamTest = () => dispatch(testUpstreamWithFormValues());
 
@@ -178,7 +181,7 @@ const Form = ({
                 <Examples />
                 <hr />
             </div>
-            <div className="col-12 mb-4">
+            <div className="col-12 mb-2">
                 <label
                     className="form__label form__label--with-desc"
                     htmlFor="bootstrap_dns"
@@ -202,7 +205,7 @@ const Form = ({
             <div className="col-12">
                 <hr />
             </div>
-            <div className="col-12 mb-4">
+            <div className="col-12">
                 <label
                     className="form__label form__label--with-desc"
                     htmlFor="local_ptr"
@@ -211,6 +214,14 @@ const Form = ({
                 </label>
                 <div className="form__desc form__desc--top">
                     <Trans>local_ptr_desc</Trans>
+                </div>
+                <div className="form__desc form__desc--top">
+                    {/** TODO: Add internazionalization for "" */}
+                    {defaultLocalPtrUpstreams?.length > 0 ? (
+                        <Trans values={{ ip: defaultLocalPtrUpstreams.map((s) => `"${s}"`).join(', ') }}>local_ptr_default_resolver</Trans>
+                    ) : (
+                        <Trans>local_ptr_no_default_resolver</Trans>
+                    )}
                 </div>
                 <Field
                     id="local_ptr_upstreams"
@@ -222,6 +233,19 @@ const Form = ({
                     disabled={processingSetConfig}
                     normalizeOnBlur={removeEmptyLines}
                 />
+                <div className="mt-4">
+                    <Field
+                        name="use_private_ptr_resolvers"
+                        type="checkbox"
+                        component={CheckboxField}
+                        placeholder={t('use_private_ptr_resolvers_title')}
+                        subtitle={t('use_private_ptr_resolvers_desc')}
+                        disabled={processingSetConfig}
+                    />
+                </div>
+            </div>
+            <div className="col-12">
+                <hr />
             </div>
             <div className="col-12 mb-4">
                 <Field

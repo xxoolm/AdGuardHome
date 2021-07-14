@@ -6,14 +6,14 @@ import (
 	"net/url"
 	"os"
 	"path/filepath"
-	"strconv"
 
-	"github.com/AdguardTeam/AdGuardHome/internal/agherr"
-	"github.com/AdguardTeam/AdGuardHome/internal/dnsfilter"
+	"github.com/AdguardTeam/AdGuardHome/internal/aghnet"
 	"github.com/AdguardTeam/AdGuardHome/internal/dnsforward"
+	"github.com/AdguardTeam/AdGuardHome/internal/filtering"
 	"github.com/AdguardTeam/AdGuardHome/internal/querylog"
 	"github.com/AdguardTeam/AdGuardHome/internal/stats"
 	"github.com/AdguardTeam/dnsproxy/proxy"
+	"github.com/AdguardTeam/golibs/errors"
 	"github.com/AdguardTeam/golibs/log"
 	"github.com/ameshkov/dnscrypt/v2"
 	yaml "gopkg.in/yaml.v2"
@@ -48,7 +48,7 @@ func initDNSServer() error {
 		HTTPRegister:      httpRegister,
 		FindClient:        Context.clients.findMultiple,
 		BaseDir:           baseDir,
-		RotationIvl:       config.DNS.QueryLogInterval,
+		RotationIvl:       config.DNS.QueryLogInterval.Duration,
 		MemSize:           config.DNS.QueryLogMemSize,
 		Enabled:           config.DNS.QueryLogEnabled,
 		FileEnabled:       config.DNS.QueryLogFileEnabled,
@@ -60,7 +60,7 @@ func initDNSServer() error {
 	filterConf.EtcHosts = Context.etcHosts
 	filterConf.ConfigModified = onConfigModified
 	filterConf.HTTPRegister = httpRegister
-	Context.dnsFilter = dnsfilter.New(&filterConf, nil)
+	Context.dnsFilter = filtering.New(&filterConf, nil)
 
 	p := dnsforward.DNSCreateParams{
 		DNSFilter:      Context.dnsFilter,
@@ -94,8 +94,8 @@ func initDNSServer() error {
 		return fmt.Errorf("dnsServer.Prepare: %w", err)
 	}
 
-	Context.rdns = NewRDNS(Context.dnsServer, &Context.clients)
-	Context.whois = initWhois(&Context.clients)
+	Context.rdns = NewRDNS(Context.dnsServer, &Context.clients, config.DNS.UsePrivateRDNS)
+	Context.whois = initWHOIS(&Context.clients)
 
 	Context.filters.Init()
 	return nil
@@ -105,8 +105,8 @@ func isRunning() bool {
 	return Context.dnsServer != nil && Context.dnsServer.IsRunning()
 }
 
-func onDNSRequest(d *proxy.DNSContext) {
-	ip := dnsforward.IPFromAddr(d.Addr)
+func onDNSRequest(pctx *proxy.DNSContext) {
+	ip := aghnet.IPFromAddr(pctx.Addr)
 	if ip == nil {
 		// This would be quite weird if we get here.
 		return
@@ -194,27 +194,29 @@ func generateServerConfig() (newConf dnsforward.ServerConfig, err error) {
 
 	newConf.TLSv12Roots = Context.tlsRoots
 	newConf.TLSCiphers = Context.tlsCiphers
-	newConf.TLSAllowUnencryptedDOH = tlsConf.AllowUnencryptedDOH
+	newConf.TLSAllowUnencryptedDoH = tlsConf.AllowUnencryptedDoH
 
 	newConf.FilterHandler = applyAdditionalFiltering
-	newConf.GetCustomUpstreamByClient = Context.clients.FindUpstreams
+	newConf.GetCustomUpstreamByClient = Context.clients.findUpstreams
 
 	newConf.ResolveClients = dnsConf.ResolveClients
+	newConf.UsePrivateRDNS = dnsConf.UsePrivateRDNS
 	newConf.LocalPTRResolvers = dnsConf.LocalPTRResolvers
+	newConf.UpstreamTimeout = dnsConf.UpstreamTimeout.Duration
 
 	return newConf, nil
 }
 
 func newDNSCrypt(hosts []net.IP, tlsConf tlsConfigSettings) (dnscc dnsforward.DNSCryptConfig, err error) {
 	if tlsConf.DNSCryptConfigFile == "" {
-		return dnscc, agherr.Error("no dnscrypt_config_file")
+		return dnscc, errors.Error("no dnscrypt_config_file")
 	}
 
 	f, err := os.Open(tlsConf.DNSCryptConfigFile)
 	if err != nil {
 		return dnscc, fmt.Errorf("opening dnscrypt config: %w", err)
 	}
-	defer f.Close()
+	defer func() { err = errors.WithDeferred(err, f.Close()) }()
 
 	rc := &dnscrypt.ResolverConfig{}
 	err = yaml.NewDecoder(f).Decode(rc)
@@ -252,7 +254,7 @@ func getDNSEncryption() (de dnsEncryption) {
 		if tlsConf.PortHTTPS != 0 {
 			addr := hostname
 			if tlsConf.PortHTTPS != 443 {
-				addr = net.JoinHostPort(addr, strconv.Itoa(tlsConf.PortHTTPS))
+				addr = aghnet.JoinHostPort(addr, tlsConf.PortHTTPS)
 			}
 
 			de.https = (&url.URL{
@@ -265,14 +267,14 @@ func getDNSEncryption() (de dnsEncryption) {
 		if tlsConf.PortDNSOverTLS != 0 {
 			de.tls = (&url.URL{
 				Scheme: "tls",
-				Host:   net.JoinHostPort(hostname, strconv.Itoa(tlsConf.PortDNSOverTLS)),
+				Host:   aghnet.JoinHostPort(hostname, tlsConf.PortDNSOverTLS),
 			}).String()
 		}
 
 		if tlsConf.PortDNSOverQUIC != 0 {
 			de.quic = (&url.URL{
 				Scheme: "quic",
-				Host:   net.JoinHostPort(hostname, strconv.Itoa(int(tlsConf.PortDNSOverQUIC))),
+				Host:   aghnet.JoinHostPort(hostname, tlsConf.PortDNSOverQUIC),
 			}).String()
 		}
 	}
@@ -282,7 +284,7 @@ func getDNSEncryption() (de dnsEncryption) {
 
 // applyAdditionalFiltering adds additional client information and settings if
 // the client has them.
-func applyAdditionalFiltering(clientAddr net.IP, clientID string, setts *dnsfilter.FilteringSettings) {
+func applyAdditionalFiltering(clientAddr net.IP, clientID string, setts *filtering.Settings) {
 	Context.dnsFilter.ApplyBlockedServices(setts, nil, true)
 
 	if clientAddr == nil {
@@ -307,7 +309,6 @@ func applyAdditionalFiltering(clientAddr net.IP, clientID string, setts *dnsfilt
 
 	setts.ClientName = c.Name
 	setts.ClientTags = c.Tags
-
 	if !c.UseOwnSettings {
 		return
 	}
@@ -319,11 +320,14 @@ func applyAdditionalFiltering(clientAddr net.IP, clientID string, setts *dnsfilt
 }
 
 func startDNSServer() error {
+	config.RLock()
+	defer config.RUnlock()
+
 	if isRunning() {
 		return fmt.Errorf("unable to start forwarding DNS server: Already running")
 	}
 
-	enableFilters(false)
+	enableFiltersLocked(false)
 
 	Context.clients.Start()
 

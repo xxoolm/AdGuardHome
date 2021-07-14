@@ -3,7 +3,6 @@ package home
 import (
 	"context"
 	"encoding/json"
-	"errors"
 	"net/http"
 	"os"
 	"os/exec"
@@ -12,8 +11,9 @@ import (
 	"syscall"
 	"time"
 
-	"github.com/AdguardTeam/AdGuardHome/internal/aghos"
+	"github.com/AdguardTeam/AdGuardHome/internal/aghnet"
 	"github.com/AdguardTeam/AdGuardHome/internal/updater"
+	"github.com/AdguardTeam/golibs/errors"
 	"github.com/AdguardTeam/golibs/log"
 )
 
@@ -141,7 +141,7 @@ func (vr *versionResponse) confirmAutoUpdate() {
 				tlsConf.PortDNSOverQUIC < 1024)) ||
 				config.BindPort < 1024 ||
 				config.DNS.Port < 1024) {
-			canUpdate, _ = aghos.CanBindPrivilegedPorts()
+			canUpdate, _ = aghnet.CanBindPrivilegedPorts()
 		}
 		vr.CanAutoUpdate = &canUpdate
 	}

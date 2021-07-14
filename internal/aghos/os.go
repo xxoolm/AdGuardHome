@@ -1,22 +1,41 @@
-// Package aghos contains utilities for functions requiring system calls.
+// Package aghos contains utilities for functions requiring system calls and
+// other OS-specific APIs.  OS-specific network handling should go to aghnet
+// instead.
 package aghos
 
 import (
 	"fmt"
 	"os/exec"
+	"runtime"
 	"syscall"
 )
 
-// CanBindPrivilegedPorts checks if current process can bind to privileged
-// ports.
-func CanBindPrivilegedPorts() (can bool, err error) {
-	return canBindPrivilegedPorts()
+// UnsupportedError is returned by functions and methods when a particular
+// operation Op cannot be performed on the current OS.
+type UnsupportedError struct {
+	Op string
+	OS string
 }
 
-// SetRlimit sets user-specified limit of how many fd's we can use
-// https://github.com/AdguardTeam/AdGuardHome/internal/issues/659.
-func SetRlimit(val uint) {
-	setRlimit(val)
+// Error implements the error interface for *UnsupportedError.
+func (err *UnsupportedError) Error() (msg string) {
+	return fmt.Sprintf("%s is unsupported on %s", err.Op, err.OS)
+}
+
+// Unsupported is a helper that returns an *UnsupportedError with the Op field
+// set to op and the OS field set to the current OS.
+func Unsupported(op string) (err error) {
+	return &UnsupportedError{
+		Op: op,
+		OS: runtime.GOOS,
+	}
+}
+
+// SetRlimit sets user-specified limit of how many fd's we can use.
+//
+// See https://github.com/AdguardTeam/AdGuardHome/internal/issues/659.
+func SetRlimit(val uint64) (err error) {
+	return setRlimit(val)
 }
 
 // HaveAdminRights checks if the current user has root (administrator) rights.

@@ -1,3 +1,4 @@
+//go:build aix || darwin || dragonfly || freebsd || linux || netbsd || openbsd || solaris
 // +build aix darwin dragonfly freebsd linux netbsd openbsd solaris
 
 package dhcpd
@@ -29,9 +30,10 @@ func TestV4_AddRemove_static(t *testing.T) {
 	assert.Empty(t, ls)
 
 	// Add static lease.
-	l := Lease{
-		IP:     net.IP{192, 168, 10, 150},
-		HWAddr: net.HardwareAddr{0xAA, 0xAA, 0xAA, 0xAA, 0xAA, 0xAA},
+	l := &Lease{
+		Hostname: "static-1.local",
+		HWAddr:   net.HardwareAddr{0xAA, 0xAA, 0xAA, 0xAA, 0xAA, 0xAA},
+		IP:       net.IP{192, 168, 10, 150},
 	}
 
 	err = s.AddStaticLease(l)
@@ -48,7 +50,7 @@ func TestV4_AddRemove_static(t *testing.T) {
 	assert.True(t, ls[0].IsStatic())
 
 	// Try to remove static lease.
-	err = s.RemoveStaticLease(Lease{
+	err = s.RemoveStaticLease(&Lease{
 		IP:     net.IP{192, 168, 10, 110},
 		HWAddr: net.HardwareAddr{0xAA, 0xAA, 0xAA, 0xAA, 0xAA, 0xAA},
 	})
@@ -76,11 +78,13 @@ func TestV4_AddReplace(t *testing.T) {
 	require.True(t, ok)
 
 	dynLeases := []Lease{{
-		IP:     net.IP{192, 168, 10, 150},
-		HWAddr: net.HardwareAddr{0x11, 0xAA, 0xAA, 0xAA, 0xAA, 0xAA},
+		Hostname: "dynamic-1.local",
+		HWAddr:   net.HardwareAddr{0x11, 0xAA, 0xAA, 0xAA, 0xAA, 0xAA},
+		IP:       net.IP{192, 168, 10, 150},
 	}, {
-		IP:     net.IP{192, 168, 10, 151},
-		HWAddr: net.HardwareAddr{0x22, 0xAA, 0xAA, 0xAA, 0xAA, 0xAA},
+		Hostname: "dynamic-2.local",
+		HWAddr:   net.HardwareAddr{0x22, 0xAA, 0xAA, 0xAA, 0xAA, 0xAA},
+		IP:       net.IP{192, 168, 10, 151},
 	}}
 
 	for i := range dynLeases {
@@ -88,12 +92,14 @@ func TestV4_AddReplace(t *testing.T) {
 		require.NoError(t, err)
 	}
 
-	stLeases := []Lease{{
-		IP:     net.IP{192, 168, 10, 150},
-		HWAddr: net.HardwareAddr{0x33, 0xAA, 0xAA, 0xAA, 0xAA, 0xAA},
+	stLeases := []*Lease{{
+		Hostname: "static-1.local",
+		HWAddr:   net.HardwareAddr{0x33, 0xAA, 0xAA, 0xAA, 0xAA, 0xAA},
+		IP:       net.IP{192, 168, 10, 150},
 	}, {
-		IP:     net.IP{192, 168, 10, 152},
-		HWAddr: net.HardwareAddr{0x22, 0xAA, 0xAA, 0xAA, 0xAA, 0xAA},
+		Hostname: "static-2.local",
+		HWAddr:   net.HardwareAddr{0x22, 0xAA, 0xAA, 0xAA, 0xAA, 0xAA},
+		IP:       net.IP{192, 168, 10, 152},
 	}}
 
 	for _, l := range stLeases {
@@ -128,9 +134,10 @@ func TestV4StaticLease_Get(t *testing.T) {
 
 	s.conf.dnsIPAddrs = []net.IP{{192, 168, 10, 1}}
 
-	l := Lease{
-		IP:     net.IP{192, 168, 10, 150},
-		HWAddr: net.HardwareAddr{0xAA, 0xAA, 0xAA, 0xAA, 0xAA, 0xAA},
+	l := &Lease{
+		Hostname: "static-1.local",
+		HWAddr:   net.HardwareAddr{0xAA, 0xAA, 0xAA, 0xAA, 0xAA, 0xAA},
+		IP:       net.IP{192, 168, 10, 150},
 	}
 	err = s.AddStaticLease(l)
 	require.NoError(t, err)
@@ -269,7 +276,12 @@ func TestV4DynamicLease_Get(t *testing.T) {
 		assert.Equal(t, dhcpv4.MessageTypeAck, resp.MessageType())
 		assert.Equal(t, mac, resp.ClientHWAddr)
 		assert.True(t, s.conf.RangeStart.Equal(resp.YourIPAddr))
-		assert.True(t, s.conf.GatewayIP.Equal(resp.Router()[0]))
+
+		router := resp.Router()
+		require.Len(t, router, 1)
+
+		assert.Equal(t, s.conf.GatewayIP, router[0])
+
 		assert.True(t, s.conf.GatewayIP.Equal(resp.ServerIdentifier()))
 		assert.Equal(t, s.conf.subnet.Mask, resp.SubnetMask())
 		assert.Equal(t, s.conf.leaseTime.Seconds(), resp.IPAddressLeaseTime(-1).Seconds())
@@ -329,12 +341,12 @@ func TestNormalizeHostname(t *testing.T) {
 	}, {
 		name:       "error",
 		hostname:   "!!!",
-		wantErrMsg: `normalizing hostname "!!!": no valid parts`,
+		wantErrMsg: `normalizing "!!!": no valid parts`,
 		want:       "",
 	}, {
 		name:       "error_spaces",
 		hostname:   "! ! !",
-		wantErrMsg: `normalizing hostname "! ! !": no valid parts`,
+		wantErrMsg: `normalizing "! ! !": no valid parts`,
 		want:       "",
 	}}
 

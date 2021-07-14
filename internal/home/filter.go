@@ -5,7 +5,6 @@ import (
 	"fmt"
 	"hash/crc32"
 	"io"
-	"io/ioutil"
 	"net/http"
 	"os"
 	"path/filepath"
@@ -16,7 +15,8 @@ import (
 	"sync/atomic"
 	"time"
 
-	"github.com/AdguardTeam/AdGuardHome/internal/dnsfilter"
+	"github.com/AdguardTeam/AdGuardHome/internal/filtering"
+	"github.com/AdguardTeam/golibs/errors"
 	"github.com/AdguardTeam/golibs/log"
 )
 
@@ -57,9 +57,8 @@ func (f *Filtering) Close() {
 
 func defaultFilters() []filter {
 	return []filter{
-		{Filter: dnsfilter.Filter{ID: 1}, Enabled: true, URL: "https://adguardteam.github.io/AdGuardSDNSFilter/Filters/filter.txt", Name: "AdGuard DNS filter"},
-		{Filter: dnsfilter.Filter{ID: 2}, Enabled: false, URL: "https://adaway.org/hosts.txt", Name: "AdAway Default Blocklist"},
-		{Filter: dnsfilter.Filter{ID: 4}, Enabled: false, URL: "https://www.malwaredomainlist.com/hostslist/hosts.txt", Name: "MalwareDomainList.com Hosts List"},
+		{Filter: filtering.Filter{ID: 1}, Enabled: true, URL: "https://adguardteam.github.io/AdGuardSDNSFilter/Filters/filter.txt", Name: "AdGuard DNS filter"},
+		{Filter: filtering.Filter{ID: 2}, Enabled: false, URL: "https://adaway.org/hosts.txt", Name: "AdAway Default Blocklist"},
 	}
 }
 
@@ -73,17 +72,7 @@ type filter struct {
 	checksum    uint32    // checksum of the file data
 	white       bool
 
-	dnsfilter.Filter `yaml:",inline"`
-}
-
-// Creates a helper object for working with the user rules
-func userFilter() filter {
-	f := filter{
-		// User filter always has constant ID=0
-		Enabled: true,
-	}
-	f.Filter.Data = []byte(strings.Join(config.UserRules, "\n"))
-	return f
+	filtering.Filter `yaml:",inline"`
 }
 
 const (
@@ -386,9 +375,9 @@ const (
 //  . If filter data has changed:
 //    . rename the temporary file (<temp> -> 1.txt)
 //      Note that this method works only on UNIX.
-//      On Windows we don't pass files to dnsfilter - we pass the whole data.
-//  . Pass new filters to dnsfilter object - it analyzes new data while the old filters are still active
-//  . dnsfilter activates new filters
+//      On Windows we don't pass files to filtering - we pass the whole data.
+//  . Pass new filters to filtering object - it analyzes new data while the old filters are still active
+//  . filtering activates new filters
 //
 // Return the number of updated filters
 // Return TRUE - there was a network error and nothing could be updated
@@ -551,7 +540,7 @@ func (f *Filtering) updateIntl(filter *filter) (updated bool, err error) {
 	updated = false
 	log.Tracef("Downloading update for filter %d from %s", filter.ID, filter.URL)
 
-	tmpFile, err := ioutil.TempFile(filepath.Join(Context.getDataDir(), filterDir), "")
+	tmpFile, err := os.CreateTemp(filepath.Join(Context.getDataDir(), filterDir), "")
 	if err != nil {
 		return updated, err
 	}
@@ -569,6 +558,15 @@ func (f *Filtering) updateIntl(filter *filter) (updated bool, err error) {
 		}
 	}()
 
+	// Change the default 0o600 permission to something more acceptable by
+	// end users.
+	//
+	// See https://github.com/AdguardTeam/AdGuardHome/issues/3198.
+	err = tmpFile.Chmod(0o644)
+	if err != nil {
+		return updated, fmt.Errorf("changing file mode: %w", err)
+	}
+
 	var reader io.Reader
 	if filepath.IsAbs(filter.URL) {
 		var f io.ReadCloser
@@ -576,17 +574,18 @@ func (f *Filtering) updateIntl(filter *filter) (updated bool, err error) {
 		if err != nil {
 			return updated, fmt.Errorf("open file: %w", err)
 		}
+		defer func() { err = errors.WithDeferred(err, f.Close()) }()
 
-		defer f.Close()
 		reader = f
 	} else {
 		var resp *http.Response
 		resp, err = Context.client.Get(filter.URL)
 		if err != nil {
 			log.Printf("Couldn't request filter from URL %s, skipping: %s", filter.URL, err)
+
 			return updated, err
 		}
-		defer resp.Body.Close()
+		defer func() { err = errors.WithDeferred(err, resp.Body.Close()) }()
 
 		if resp.StatusCode != http.StatusOK {
 			log.Printf("Got status code %d from URL %s, skipping", resp.StatusCode, filter.URL)
@@ -632,29 +631,32 @@ func (f *Filtering) updateIntl(filter *filter) (updated bool, err error) {
 }
 
 // loads filter contents from the file in dataDir
-func (f *Filtering) load(filter *filter) error {
+func (f *Filtering) load(filter *filter) (err error) {
 	filterFilePath := filter.Path()
-	log.Tracef("Loading filter %d contents to: %s", filter.ID, filterFilePath)
 
-	if _, err := os.Stat(filterFilePath); os.IsNotExist(err) {
-		// do nothing, file doesn't exist
-		return err
-	}
+	log.Tracef("filtering: loading filter %d contents to: %s", filter.ID, filterFilePath)
 
 	file, err := os.Open(filterFilePath)
-	if err != nil {
-		return err
+	if errors.Is(err, os.ErrNotExist) {
+		// Do nothing, file doesn't exist.
+		return nil
+	} else if err != nil {
+		return fmt.Errorf("opening filter file: %w", err)
 	}
-	defer file.Close()
-	st, _ := file.Stat()
+	defer func() { err = errors.WithDeferred(err, file.Close()) }()
 
-	log.Tracef("File %s, id %d, length %d",
-		filterFilePath, filter.ID, st.Size())
+	st, err := file.Stat()
+	if err != nil {
+		return fmt.Errorf("getting filter file stat: %w", err)
+	}
+
+	log.Tracef("filtering: File %s, id %d, length %d", filterFilePath, filter.ID, st.Size())
+
 	rulesCount, checksum, _ := f.parseFilterContents(file)
 
 	filter.RulesCount = rulesCount
 	filter.checksum = checksum
-	filter.LastUpdated = filter.LastTimeUpdated()
+	filter.LastUpdated = st.ModTime()
 
 	return nil
 }
@@ -670,60 +672,43 @@ func (filter *filter) Path() string {
 	return filepath.Join(Context.getDataDir(), filterDir, strconv.FormatInt(filter.ID, 10)+".txt")
 }
 
-// LastTimeUpdated returns the time when the filter was last time updated
-func (filter *filter) LastTimeUpdated() time.Time {
-	filterFilePath := filter.Path()
-	s, err := os.Stat(filterFilePath)
-	if os.IsNotExist(err) {
-		// if the filter file does not exist, return 0001-01-01
-		return time.Time{}
-	}
+func enableFilters(async bool) {
+	config.RLock()
+	defer config.RUnlock()
 
-	if err != nil {
-		// if the filter file does not exist, return 0001-01-01
-		return time.Time{}
-	}
-
-	// filter file modified time
-	return s.ModTime()
+	enableFiltersLocked(async)
 }
 
-func enableFilters(async bool) {
-	var filters []dnsfilter.Filter
-	var whiteFilters []dnsfilter.Filter
-	if config.DNS.FilteringEnabled {
-		// convert array of filters
+func enableFiltersLocked(async bool) {
+	var whiteFilters []filtering.Filter
+	filters := []filtering.Filter{{
+		Data: []byte(strings.Join(config.UserRules, "\n")),
+	}}
 
-		userFilter := userFilter()
-		f := dnsfilter.Filter{
-			ID:   userFilter.ID,
-			Data: userFilter.Data,
+	for _, filter := range config.Filters {
+		if !filter.Enabled {
+			continue
 		}
-		filters = append(filters, f)
 
-		for _, filter := range config.Filters {
-			if !filter.Enabled {
-				continue
-			}
-
-			f = dnsfilter.Filter{
-				ID:       filter.ID,
-				FilePath: filter.Path(),
-			}
-			filters = append(filters, f)
+		filters = append(filters, filtering.Filter{
+			ID:       filter.ID,
+			FilePath: filter.Path(),
+		})
+	}
+	for _, filter := range config.WhitelistFilters {
+		if !filter.Enabled {
+			continue
 		}
-		for _, filter := range config.WhitelistFilters {
-			if !filter.Enabled {
-				continue
-			}
 
-			f = dnsfilter.Filter{
-				ID:       filter.ID,
-				FilePath: filter.Path(),
-			}
-			whiteFilters = append(whiteFilters, f)
-		}
+		whiteFilters = append(whiteFilters, filtering.Filter{
+			ID:       filter.ID,
+			FilePath: filter.Path(),
+		})
 	}
 
-	_ = Context.dnsFilter.SetFilters(filters, whiteFilters, async)
+	if err := Context.dnsFilter.SetFilters(filters, whiteFilters, async); err != nil {
+		log.Debug("enabling filters: %s", err)
+	}
+
+	Context.dnsFilter.SetEnabled(config.DNS.FilteringEnabled)
 }

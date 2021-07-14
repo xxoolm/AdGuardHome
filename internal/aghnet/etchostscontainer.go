@@ -2,9 +2,6 @@ package aghnet
 
 import (
 	"bufio"
-	"errors"
-	"io"
-	"io/ioutil"
 	"net"
 	"os"
 	"path/filepath"
@@ -13,6 +10,7 @@ import (
 	"sync"
 
 	"github.com/AdguardTeam/AdGuardHome/internal/aghos"
+	"github.com/AdguardTeam/golibs/errors"
 	"github.com/AdguardTeam/golibs/log"
 	"github.com/fsnotify/fsnotify"
 	"github.com/miekg/dns"
@@ -29,10 +27,9 @@ type EtcHostsContainer struct {
 	lock sync.RWMutex
 	// table is the host-to-IPs map.
 	table map[string][]net.IP
-	// tableReverse is the IP-to-hosts map.
-	//
-	// TODO(a.garipov): Make better use of newtypes.  Perhaps a custom map.
-	tableReverse map[string][]string
+	// tableReverse is the IP-to-hosts map.  The type of the values in the
+	// map is []string.
+	tableReverse *IPMap
 
 	hostsFn   string            // path to the main hosts-file
 	hostsDirs []string          // paths to OS-specific directories with hosts-files
@@ -82,7 +79,7 @@ func (ehc *EtcHostsContainer) Init(hostsFn string) {
 	var err error
 	ehc.watcher, err = fsnotify.NewWatcher()
 	if err != nil {
-		log.Error("etchostscontainer: %s", err)
+		log.Error("etchosts: %s", err)
 	}
 }
 
@@ -122,7 +119,9 @@ func (ehc *EtcHostsContainer) Close() {
 	if ehc.watcher != nil {
 		_ = ehc.watcher.Close()
 	}
-	close(ehc.onlyWritesChan)
+
+	// Don't close onlyWritesChan here and let onlyWrites close it after
+	// watcher.Events is closed to prevent close races.
 }
 
 // Process returns the list of IP addresses for the hostname or nil if nothing
@@ -141,7 +140,7 @@ func (ehc *EtcHostsContainer) Process(host string, qtype uint16) []net.IP {
 		copy(ipsCopy, ips)
 	}
 
-	log.Debug("etchostscontainer: answer: %s -> %v", host, ipsCopy)
+	log.Debug("etchosts: answer: %s -> %v", host, ipsCopy)
 	return ipsCopy
 }
 
@@ -151,38 +150,40 @@ func (ehc *EtcHostsContainer) ProcessReverse(addr string, qtype uint16) (hosts [
 		return nil
 	}
 
-	ipReal := UnreverseAddr(addr)
-	if ipReal == nil {
+	ip := UnreverseAddr(addr)
+	if ip == nil {
 		return nil
 	}
-
-	ipStr := ipReal.String()
 
 	ehc.lock.RLock()
 	defer ehc.lock.RUnlock()
 
-	hosts = ehc.tableReverse[ipStr]
-
-	if len(hosts) == 0 {
-		return nil // not found
+	v, ok := ehc.tableReverse.Get(ip)
+	if !ok {
+		return nil
 	}
 
-	log.Debug("etchostscontainer: reverse-lookup: %s -> %s", addr, hosts)
+	hosts, ok = v.([]string)
+	if !ok {
+		log.Error("etchosts: bad type %T in tableReverse for %s", v, ip)
+
+		return nil
+	} else if len(hosts) == 0 {
+		return nil
+	}
+
+	log.Debug("etchosts: reverse-lookup: %s -> %s", addr, hosts)
 
 	return hosts
 }
 
-// List returns an IP-to-hostnames table.  It is safe for concurrent use.
-func (ehc *EtcHostsContainer) List() (ipToHosts map[string][]string) {
+// List returns an IP-to-hostnames table.  The type of the values in the map is
+// []string.  It is safe for concurrent use.
+func (ehc *EtcHostsContainer) List() (ipToHosts *IPMap) {
 	ehc.lock.RLock()
 	defer ehc.lock.RUnlock()
 
-	ipToHosts = make(map[string][]string, len(ehc.tableReverse))
-	for k, v := range ehc.tableReverse {
-		ipToHosts[k] = v
-	}
-
-	return ipToHosts
+	return ehc.tableReverse.ShallowClone()
 }
 
 // update table
@@ -205,59 +206,80 @@ func (ehc *EtcHostsContainer) updateTable(table map[string][]net.IP, host string
 		ok = true
 	}
 	if ok {
-		log.Debug("etchostscontainer: added %s -> %s", ipAddr, host)
+		log.Debug("etchosts: added %s -> %s", ipAddr, host)
 	}
 }
 
 // updateTableRev updates the reverse address table.
-func (ehc *EtcHostsContainer) updateTableRev(tableRev map[string][]string, newHost string, ipAddr net.IP) {
-	ipStr := ipAddr.String()
-	hosts, ok := tableRev[ipStr]
+func (ehc *EtcHostsContainer) updateTableRev(tableRev *IPMap, newHost string, ip net.IP) {
+	v, ok := tableRev.Get(ip)
 	if !ok {
-		tableRev[ipStr] = []string{newHost}
-		log.Debug("etchostscontainer: added reverse-address %s -> %s", ipStr, newHost)
+		tableRev.Set(ip, []string{newHost})
+		log.Debug("etchosts: added reverse-address %s -> %s", ip, newHost)
 
 		return
 	}
 
+	hosts, _ := v.([]string)
 	for _, host := range hosts {
 		if host == newHost {
 			return
 		}
 	}
 
-	tableRev[ipStr] = append(tableRev[ipStr], newHost)
-	log.Debug("etchostscontainer: added reverse-address %s -> %s", ipStr, newHost)
+	hosts = append(hosts, newHost)
+	tableRev.Set(ip, hosts)
+
+	log.Debug("etchosts: added reverse-address %s -> %s", ip, newHost)
 }
 
-// Read IP-hostname pairs from file
-// Multiple hostnames per line (per one IP) is supported.
-func (ehc *EtcHostsContainer) load(table map[string][]net.IP, tableRev map[string][]string, fn string) {
+// parseHostsLine parses hosts from the fields.
+func parseHostsLine(fields []string) (hosts []string) {
+	for _, f := range fields {
+		hashIdx := strings.IndexByte(f, '#')
+		if hashIdx == 0 {
+			// The rest of the fields are a part of the comment.
+			// Skip immediately.
+			return
+		} else if hashIdx > 0 {
+			// Only a part of the field is a comment.
+			hosts = append(hosts, f[:hashIdx])
+
+			return hosts
+		}
+
+		hosts = append(hosts, f)
+	}
+
+	return hosts
+}
+
+// load reads IP-hostname pairs from the hosts file.  Multiple hostnames per
+// line for one IP are supported.
+func (ehc *EtcHostsContainer) load(
+	table map[string][]net.IP,
+	tableRev *IPMap,
+	fn string,
+) {
 	f, err := os.Open(fn)
 	if err != nil {
-		log.Error("etchostscontainer: %s", err)
+		log.Error("etchosts: %s", err)
+
 		return
 	}
-	defer f.Close()
-	r := bufio.NewReader(f)
-	log.Debug("etchostscontainer: loading hosts from file %s", fn)
 
-	for done := false; !done; {
-		var line string
-		line, err = r.ReadString('\n')
-		if err == io.EOF {
-			done = true
-		} else if err != nil {
-			log.Error("etchostscontainer: %s", err)
-
-			return
+	defer func() {
+		derr := f.Close()
+		if derr != nil {
+			log.Error("etchosts: closing file: %s", err)
 		}
+	}()
 
-		line = strings.TrimSpace(line)
-		if len(line) == 0 || line[0] == '#' {
-			continue
-		}
+	log.Debug("etchosts: loading hosts from file %s", fn)
 
+	s := bufio.NewScanner(f)
+	for s.Scan() {
+		line := strings.TrimSpace(s.Text())
 		fields := strings.Fields(line)
 		if len(fields) < 2 {
 			continue
@@ -268,27 +290,16 @@ func (ehc *EtcHostsContainer) load(table map[string][]net.IP, tableRev map[strin
 			continue
 		}
 
-		for i := 1; i != len(fields); i++ {
-			host := fields[i]
-			if len(host) == 0 {
-				break
-			}
-
-			sharp := strings.IndexByte(host, '#')
-			if sharp == 0 {
-				// Skip the comments.
-				break
-			} else if sharp > 0 {
-				host = host[:sharp]
-			}
-
+		hosts := parseHostsLine(fields[1:])
+		for _, host := range hosts {
 			ehc.updateTable(table, host, ip)
 			ehc.updateTableRev(tableRev, host, ip)
-			if sharp >= 0 {
-				// Skip the comments again.
-				break
-			}
 		}
+	}
+
+	err = s.Err()
+	if err != nil {
+		log.Error("etchosts: %s", err)
 	}
 }
 
@@ -299,6 +310,8 @@ func (ehc *EtcHostsContainer) onlyWrites() {
 			ehc.onlyWritesChan <- event
 		}
 	}
+
+	close(ehc.onlyWritesChan)
 }
 
 // Receive notifications from fsnotify package
@@ -324,7 +337,7 @@ func (ehc *EtcHostsContainer) watcherLoop() {
 			}
 
 			if event.Op&fsnotify.Write == fsnotify.Write {
-				log.Debug("etchostscontainer: modified: %s", event.Name)
+				log.Debug("etchosts: modified: %s", event.Name)
 				ehc.updateHosts()
 			}
 
@@ -332,7 +345,7 @@ func (ehc *EtcHostsContainer) watcherLoop() {
 			if !ok {
 				return
 			}
-			log.Error("etchostscontainer: %s", err)
+			log.Error("etchosts: %s", err)
 		}
 	}
 }
@@ -340,22 +353,22 @@ func (ehc *EtcHostsContainer) watcherLoop() {
 // updateHosts - loads system hosts
 func (ehc *EtcHostsContainer) updateHosts() {
 	table := make(map[string][]net.IP)
-	tableRev := make(map[string][]string)
+	tableRev := NewIPMap(0)
 
 	ehc.load(table, tableRev, ehc.hostsFn)
 
 	for _, dir := range ehc.hostsDirs {
-		fis, err := ioutil.ReadDir(dir)
+		des, err := os.ReadDir(dir)
 		if err != nil {
 			if !errors.Is(err, os.ErrNotExist) {
-				log.Error("etchostscontainer: Opening directory: %q: %s", dir, err)
+				log.Error("etchosts: Opening directory: %q: %s", dir, err)
 			}
 
 			continue
 		}
 
-		for _, fi := range fis {
-			ehc.load(table, tableRev, filepath.Join(dir, fi.Name()))
+		for _, de := range des {
+			ehc.load(table, tableRev, filepath.Join(dir, de.Name()))
 		}
 	}
 

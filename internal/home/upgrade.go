@@ -9,8 +9,10 @@ import (
 	"runtime"
 	"strconv"
 	"strings"
+	"time"
 
 	"github.com/AdguardTeam/AdGuardHome/internal/aghnet"
+	"github.com/AdguardTeam/golibs/errors"
 	"github.com/AdguardTeam/golibs/log"
 	"github.com/google/renameio/maybe"
 	"golang.org/x/crypto/bcrypt"
@@ -18,7 +20,7 @@ import (
 )
 
 // currentSchemaVersion is the current schema version.
-const currentSchemaVersion = 10
+const currentSchemaVersion = 12
 
 // These aliases are provided for convenience.
 type (
@@ -80,6 +82,8 @@ func upgradeConfigSchema(oldVersion int, diskConf yobj) (err error) {
 		upgradeSchema7to8,
 		upgradeSchema8to9,
 		upgradeSchema9to10,
+		upgradeSchema10to11,
+		upgradeSchema11to12,
 	}
 
 	n := 0
@@ -115,17 +119,16 @@ func upgradeConfigSchema(oldVersion int, diskConf yobj) (err error) {
 
 // The first schema upgrade:
 // No more "dnsfilter.txt", filters are now kept in data/filters/
-func upgradeSchema0to1(diskConf yobj) error {
+func upgradeSchema0to1(diskConf yobj) (err error) {
 	log.Printf("%s(): called", funcName())
 
 	dnsFilterPath := filepath.Join(Context.workDir, "dnsfilter.txt")
-	if _, err := os.Stat(dnsFilterPath); !os.IsNotExist(err) {
-		log.Printf("Deleting %s as we don't need it anymore", dnsFilterPath)
-		err = os.Remove(dnsFilterPath)
-		if err != nil {
-			log.Printf("Cannot remove %s due to %s", dnsFilterPath, err)
-			// not fatal, move on
-		}
+	log.Printf("deleting %s as we don't need it anymore", dnsFilterPath)
+	err = os.Remove(dnsFilterPath)
+	if err != nil && !errors.Is(err, os.ErrNotExist) {
+		log.Info("warning: %s", err)
+
+		// Go on.
 	}
 
 	diskConf["schema_version"] = 1
@@ -136,17 +139,16 @@ func upgradeSchema0to1(diskConf yobj) error {
 // Second schema upgrade:
 // coredns is now dns in config
 // delete 'Corefile', since we don't use that anymore
-func upgradeSchema1to2(diskConf yobj) error {
+func upgradeSchema1to2(diskConf yobj) (err error) {
 	log.Printf("%s(): called", funcName())
 
 	coreFilePath := filepath.Join(Context.workDir, "Corefile")
-	if _, err := os.Stat(coreFilePath); !os.IsNotExist(err) {
-		log.Printf("Deleting %s as we don't need it anymore", coreFilePath)
-		err = os.Remove(coreFilePath)
-		if err != nil {
-			log.Printf("Cannot remove %s due to %s", coreFilePath, err)
-			// not fatal, move on
-		}
+	log.Printf("deleting %s as we don't need it anymore", coreFilePath)
+	err = os.Remove(coreFilePath)
+	if err != nil && !errors.Is(err, os.ErrNotExist) {
+		log.Info("warning: %s", err)
+
+		// Go on.
 	}
 
 	if _, ok := diskConf["dns"]; !ok {
@@ -608,6 +610,81 @@ func upgradeSchema9to10(diskConf yobj) (err error) {
 		}
 		dns[upsField] = ups
 	}
+
+	return nil
+}
+
+// upgradeSchema10to11 performs the following changes:
+//
+//   # BEFORE:
+//   'rlimit_nofile': 42
+//
+//   # AFTER:
+//   'os':
+//     'group': ''
+//     'rlimit_nofile': 42
+//     'user': ''
+//
+func upgradeSchema10to11(diskConf yobj) (err error) {
+	log.Printf("Upgrade yaml: 10 to 11")
+
+	diskConf["schema_version"] = 11
+
+	rlimit := 0
+	rlimitVal, ok := diskConf["rlimit_nofile"]
+	if ok {
+		rlimit, ok = rlimitVal.(int)
+		if !ok {
+			return fmt.Errorf("unexpected type of rlimit_nofile: %T", rlimitVal)
+		}
+	}
+
+	delete(diskConf, "rlimit_nofile")
+	diskConf["os"] = yobj{
+		"group":         "",
+		"rlimit_nofile": rlimit,
+		"user":          "",
+	}
+
+	return nil
+}
+
+// upgradeSchema11to12 performs the following changes:
+//
+//   # BEFORE:
+//   'querylog_interval': 90
+//
+//   # AFTER:
+//   'querylog_interval': '2160h'
+//
+func upgradeSchema11to12(diskConf yobj) (err error) {
+	log.Printf("Upgrade yaml: 11 to 12")
+	diskConf["schema_version"] = 12
+
+	dnsVal, ok := diskConf["dns"]
+	if !ok {
+		return nil
+	}
+
+	var dns yobj
+	dns, ok = dnsVal.(yobj)
+	if !ok {
+		return fmt.Errorf("unexpected type of dns: %T", dnsVal)
+	}
+
+	const field = "querylog_interval"
+
+	// Set the initial value from home.initConfig function.
+	qlogIvl := 90
+	qlogIvlVal, ok := dns[field]
+	if ok {
+		qlogIvl, ok = qlogIvlVal.(int)
+		if !ok {
+			return fmt.Errorf("unexpected type of %s: %T", field, qlogIvlVal)
+		}
+	}
+
+	dns[field] = Duration{Duration: time.Duration(qlogIvl) * 24 * time.Hour}
 
 	return nil
 }

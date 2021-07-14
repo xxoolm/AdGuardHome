@@ -2,7 +2,7 @@ package home
 
 import (
 	"fmt"
-	"io/ioutil"
+	"io/fs"
 	"os"
 	"runtime"
 	"strconv"
@@ -10,6 +10,7 @@ import (
 	"syscall"
 
 	"github.com/AdguardTeam/AdGuardHome/internal/aghos"
+	"github.com/AdguardTeam/golibs/errors"
 	"github.com/AdguardTeam/golibs/log"
 	"github.com/kardianos/service"
 )
@@ -27,7 +28,8 @@ const (
 
 // Represents the program that will be launched by a service or daemon
 type program struct {
-	opts options
+	clientBuildFS fs.FS
+	opts          options
 }
 
 // Start should quickly start the program
@@ -35,7 +37,8 @@ func (p *program) Start(s service.Service) error {
 	// Start should not block. Do the actual work async.
 	args := p.opts
 	args.runningAsService = true
-	go run(args)
+	go run(args, p.clientBuildFS)
+
 	return nil
 }
 
@@ -88,24 +91,27 @@ func svcAction(s service.Service, action string) (err error) {
 // If pid-file doesn't exist, find our PID using 'ps' command
 func sendSigReload() {
 	if runtime.GOOS == "windows" {
-		log.Error("Not implemented on Windows")
+		log.Error("not implemented on windows")
+
 		return
 	}
 
 	pidfile := fmt.Sprintf("/var/run/%s.pid", serviceName)
-	data, err := ioutil.ReadFile(pidfile)
-	if os.IsNotExist(err) {
+	data, err := os.ReadFile(pidfile)
+	if errors.Is(err, os.ErrNotExist) {
 		var code int
 		var psdata string
 		code, psdata, err = aghos.RunCommand("ps", "-C", serviceName, "-o", "pid=")
 		if err != nil || code != 0 {
-			log.Error("Can't find AdGuardHome process: %s  code:%d", err, code)
+			log.Error("finding AdGuardHome process: code: %d, error: %s", code, err)
+
 			return
 		}
-		data = []byte(psdata)
 
+		data = []byte(psdata)
 	} else if err != nil {
-		log.Error("Can't read PID file %s: %s", pidfile, err)
+		log.Error("reading pid file %s: %s", pidfile, err)
+
 		return
 	}
 
@@ -138,7 +144,7 @@ func sendSigReload() {
 // run - this is a special command that is not supposed to be used directly
 // it is specified when we register a service, and it indicates to the app
 // that it is being run as a service/daemon.
-func handleServiceControlAction(opts options) {
+func handleServiceControlAction(opts options, clientBuildFS fs.FS) {
 	action := opts.serviceControlAction
 	log.Printf("Service control action: %s", action)
 
@@ -161,7 +167,10 @@ func handleServiceControlAction(opts options) {
 		Arguments:        serialize(runOpts),
 	}
 	configureService(svcConfig)
-	prg := &program{runOpts}
+	prg := &program{
+		clientBuildFS: clientBuildFS,
+		opts:          runOpts,
+	}
 	s, err := service.New(prg, svcConfig)
 	if err != nil {
 		log.Fatal(err)
@@ -234,7 +243,8 @@ func handleServiceInstallCommand(s service.Service) {
 		log.Printf(`Almost ready!
 AdGuard Home is successfully installed and will automatically start on boot.
 There are a few more things that must be configured before you can use it.
-Click on the link below and follow the Installation Wizard steps to finish setup.`)
+Click on the link below and follow the Installation Wizard steps to finish setup.
+AdGuard Home is now available at the following addresses:`)
 		printHTTPAddresses(schemeHTTP)
 	}
 }
@@ -258,12 +268,12 @@ func handleServiceUninstallCommand(s service.Service) {
 	if runtime.GOOS == "darwin" {
 		// Remove log files on cleanup and log errors.
 		err = os.Remove(launchdStdoutPath)
-		if err != nil && !os.IsNotExist(err) {
+		if err != nil && !errors.Is(err, os.ErrNotExist) {
 			log.Printf("removing stdout file: %s", err)
 		}
 
 		err = os.Remove(launchdStderrPath)
-		if err != nil && !os.IsNotExist(err) {
+		if err != nil && !errors.Is(err, os.ErrNotExist) {
 			log.Printf("removing stderr file: %s", err)
 		}
 	}
@@ -273,7 +283,8 @@ func handleServiceUninstallCommand(s service.Service) {
 func configureService(c *service.Config) {
 	c.Option = service.KeyValue{}
 
-	// OS X
+	// macOS
+
 	// Redefines the launchd config file template
 	// The purpose is to enable stdout/stderr redirect by default
 	c.Option["LaunchdConfig"] = launchdConfig
@@ -281,6 +292,7 @@ func configureService(c *service.Config) {
 	c.Option["RunAtLoad"] = true
 
 	// POSIX
+
 	// Redirect StdErr & StdOut to files.
 	c.Option["LogOutput"] = true
 

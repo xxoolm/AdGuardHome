@@ -53,19 +53,19 @@ Optional environment:
     make ARCH='amd64 arm64' OS='darwin linux' … build-release
     ```
     The default value is `''`, which means build everything.
+ *  `BUILD_SNAP`: `0` to not build Snapcraft packages, `1` to build.  The
+    default value is `1`.
  *  `DIST_DIR`: the directory to build a release into.  The default value is
     `dist`.
  *  `GO`: set an alternarive name for the Go compiler.
  *  `SIGN`: `0` to not sign the resulting packages, `1` to sign.  The default
-    value is `1`.
- *  `SNAP`: `0` to not build Snapcraft packages, `1` to build.  The default
     value is `1`.
  *  `VERBOSE`: `1` to be verbose, `2` to also print environment.  This script
     calls `go-build.sh` with the verbosity level one level lower, so to get
     verbosity level `2` in `go-build.sh`, set this to `3` when calling
     `build-release.sh`.
  *  `VERSION`: release version.  Will be set by `version.sh` if it is unset or
-    it has the default `Makefile` value of `v0.0.0`.
+    if it has the default `Makefile` value of `v0.0.0`.
 
  ###  `clean.sh`: Cleanup
 
@@ -78,6 +78,8 @@ Required environment:
  ###  `go-build.sh`: Build The Backend
 
 Optional environment:
+ *  `BUILD_TIME`: If set, overrides the build time information.  Useful for
+    reproducible builds.
  *  `GOARM`: ARM processor options for the Go compiler.
  *  `GOMIPS`: ARM processor options for the Go compiler.
  *  `GO`: set an alternarive name for the Go compiler.
@@ -87,10 +89,11 @@ Optional environment:
  *  `VERBOSE`: verbosity level.  `1` shows every command that is run and every
     Go package that is processed.  `2` also shows subcommands and environment.
     The default value is `0`, don't be verbose.
+ *  `VERSION`: release version.  Will be set by `version.sh` if it is unset or
+    if it has the default `Makefile` value of `v0.0.0`.
 
 Required environment:
  *  `CHANNEL`: release channel, see above.
- *  `VERSION`: release version.
 
  ###  `go-deps.sh`: Install Backend Dependencies
 

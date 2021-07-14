@@ -2,16 +2,19 @@ package querylog
 
 import (
 	"strings"
+	"unicode"
+	"unicode/utf8"
 
-	"github.com/AdguardTeam/AdGuardHome/internal/dnsfilter"
+	"github.com/AdguardTeam/AdGuardHome/internal/filtering"
 )
 
 type criterionType int
 
 const (
-	// ctDomainOrClient is for searching by the domain name, the client's IP
-	// address, or the clinet's ID.
-	ctDomainOrClient criterionType = iota
+	// ctTerm is for searching by the domain name, the client's IP address,
+	// the client's ID or the client's name.  The domain name search
+	// supports IDNAs.
+	ctTerm criterionType = iota
 	// ctFilteringStatus is for searching by the filtering status.
 	//
 	// See (*searchCriterion).ctFilteringStatusCase for details.
@@ -43,6 +46,7 @@ var filteringStatusValues = []string{
 // searchCriterion is a search criterion that is used to match a record.
 type searchCriterion struct {
 	value         string
+	asciiVal      string
 	criterionType criterionType
 	// strict, if true, means that the criterion must be applied to the
 	// whole value rather than the part of it.  That is, equality and not
@@ -50,39 +54,65 @@ type searchCriterion struct {
 	strict bool
 }
 
-func (c *searchCriterion) ctDomainOrClientCaseStrict(
+func ctDomainOrClientCaseStrict(
 	term string,
+	asciiTerm string,
 	clientID string,
 	name string,
 	host string,
 	ip string,
 ) (ok bool) {
 	return strings.EqualFold(host, term) ||
+		(asciiTerm != "" && strings.EqualFold(host, asciiTerm)) ||
 		strings.EqualFold(clientID, term) ||
 		strings.EqualFold(ip, term) ||
 		strings.EqualFold(name, term)
 }
 
-func (c *searchCriterion) ctDomainOrClientCaseNonStrict(
+// containsFold reports whehter s contains, ignoring letter case, substr.
+//
+// TODO(a.garipov): Move to aghstrings if needed elsewhere.
+func containsFold(s, substr string) (ok bool) {
+	sLen, substrLen := len(s), len(substr)
+	if sLen < substrLen {
+		return false
+	}
+
+	if sLen == substrLen {
+		return strings.EqualFold(s, substr)
+	}
+
+	first, _ := utf8.DecodeRuneInString(substr)
+	firstFolded := unicode.SimpleFold(first)
+
+	for i := 0; i != -1 && len(s) >= len(substr); {
+		if strings.EqualFold(s[:substrLen], substr) {
+			return true
+		}
+
+		i = strings.IndexFunc(s[1:], func(r rune) (eq bool) {
+			return r == first || r == firstFolded
+		})
+
+		s = s[1+i:]
+	}
+
+	return false
+}
+
+func ctDomainOrClientCaseNonStrict(
 	term string,
+	asciiTerm string,
 	clientID string,
 	name string,
 	host string,
 	ip string,
 ) (ok bool) {
-	// TODO(a.garipov): Write a performant, case-insensitive version of
-	// strings.Contains instead of generating garbage.  Or, perhaps in the
-	// future, use a locale-appropriate matcher from golang.org/x/text.
-	clientID = strings.ToLower(clientID)
-	host = strings.ToLower(host)
-	ip = strings.ToLower(ip)
-	name = strings.ToLower(name)
-	term = strings.ToLower(term)
-
-	return strings.Contains(clientID, term) ||
-		strings.Contains(host, term) ||
-		strings.Contains(ip, term) ||
-		strings.Contains(name, term)
+	return containsFold(clientID, term) ||
+		containsFold(host, term) ||
+		(asciiTerm != "" && containsFold(host, asciiTerm)) ||
+		containsFold(ip, term) ||
+		containsFold(name, term)
 }
 
 // quickMatch quickly checks if the line matches the given search criterion.
@@ -90,7 +120,7 @@ func (c *searchCriterion) ctDomainOrClientCaseNonStrict(
 // optimisation purposes.
 func (c *searchCriterion) quickMatch(line string, findClient quickMatchClientFunc) (ok bool) {
 	switch c.criterionType {
-	case ctDomainOrClient:
+	case ctTerm:
 		host := readJSONValue(line, `"QH":"`)
 		ip := readJSONValue(line, `"IP":"`)
 		clientID := readJSONValue(line, `"CID":"`)
@@ -101,10 +131,24 @@ func (c *searchCriterion) quickMatch(line string, findClient quickMatchClientFun
 		}
 
 		if c.strict {
-			return c.ctDomainOrClientCaseStrict(c.value, clientID, name, host, ip)
+			return ctDomainOrClientCaseStrict(
+				c.value,
+				c.asciiVal,
+				clientID,
+				name,
+				host,
+				ip,
+			)
 		}
 
-		return c.ctDomainOrClientCaseNonStrict(c.value, clientID, name, host, ip)
+		return ctDomainOrClientCaseNonStrict(
+			c.value,
+			c.asciiVal,
+			clientID,
+			name,
+			host,
+			ip,
+		)
 	case ctFilteringStatus:
 		// Go on, as we currently don't do quick matches against
 		// filtering statuses.
@@ -117,7 +161,7 @@ func (c *searchCriterion) quickMatch(line string, findClient quickMatchClientFun
 // match checks if the log entry matches this search criterion.
 func (c *searchCriterion) match(entry *logEntry) bool {
 	switch c.criterionType {
-	case ctDomainOrClient:
+	case ctTerm:
 		return c.ctDomainOrClientCase(entry)
 	case ctFilteringStatus:
 		return c.ctFilteringStatusCase(entry.Result)
@@ -136,15 +180,14 @@ func (c *searchCriterion) ctDomainOrClientCase(e *logEntry) bool {
 	}
 
 	ip := e.IP.String()
-	term := strings.ToLower(c.value)
 	if c.strict {
-		return c.ctDomainOrClientCaseStrict(term, clientID, name, host, ip)
+		return ctDomainOrClientCaseStrict(c.value, c.asciiVal, clientID, name, host, ip)
 	}
 
-	return c.ctDomainOrClientCaseNonStrict(term, clientID, name, host, ip)
+	return ctDomainOrClientCaseNonStrict(c.value, c.asciiVal, clientID, name, host, ip)
 }
 
-func (c *searchCriterion) ctFilteringStatusCase(res dnsfilter.Result) bool {
+func (c *searchCriterion) ctFilteringStatusCase(res filtering.Result) bool {
 	switch c.value {
 	case filteringStatusAll:
 		return true
@@ -152,43 +195,43 @@ func (c *searchCriterion) ctFilteringStatusCase(res dnsfilter.Result) bool {
 	case filteringStatusFiltered:
 		return res.IsFiltered ||
 			res.Reason.In(
-				dnsfilter.NotFilteredAllowList,
-				dnsfilter.Rewritten,
-				dnsfilter.RewrittenAutoHosts,
-				dnsfilter.RewrittenRule,
+				filtering.NotFilteredAllowList,
+				filtering.Rewritten,
+				filtering.RewrittenAutoHosts,
+				filtering.RewrittenRule,
 			)
 
 	case filteringStatusBlocked:
 		return res.IsFiltered &&
-			res.Reason.In(dnsfilter.FilteredBlockList, dnsfilter.FilteredBlockedService)
+			res.Reason.In(filtering.FilteredBlockList, filtering.FilteredBlockedService)
 
 	case filteringStatusBlockedService:
-		return res.IsFiltered && res.Reason == dnsfilter.FilteredBlockedService
+		return res.IsFiltered && res.Reason == filtering.FilteredBlockedService
 
 	case filteringStatusBlockedParental:
-		return res.IsFiltered && res.Reason == dnsfilter.FilteredParental
+		return res.IsFiltered && res.Reason == filtering.FilteredParental
 
 	case filteringStatusBlockedSafebrowsing:
-		return res.IsFiltered && res.Reason == dnsfilter.FilteredSafeBrowsing
+		return res.IsFiltered && res.Reason == filtering.FilteredSafeBrowsing
 
 	case filteringStatusWhitelisted:
-		return res.Reason == dnsfilter.NotFilteredAllowList
+		return res.Reason == filtering.NotFilteredAllowList
 
 	case filteringStatusRewritten:
 		return res.Reason.In(
-			dnsfilter.Rewritten,
-			dnsfilter.RewrittenAutoHosts,
-			dnsfilter.RewrittenRule,
+			filtering.Rewritten,
+			filtering.RewrittenAutoHosts,
+			filtering.RewrittenRule,
 		)
 
 	case filteringStatusSafeSearch:
-		return res.IsFiltered && res.Reason == dnsfilter.FilteredSafeSearch
+		return res.IsFiltered && res.Reason == filtering.FilteredSafeSearch
 
 	case filteringStatusProcessed:
 		return !res.Reason.In(
-			dnsfilter.FilteredBlockList,
-			dnsfilter.FilteredBlockedService,
-			dnsfilter.NotFilteredAllowList,
+			filtering.FilteredBlockList,
+			filtering.FilteredBlockedService,
+			filtering.NotFilteredAllowList,
 		)
 
 	default:

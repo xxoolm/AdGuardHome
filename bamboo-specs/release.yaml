@@ -4,9 +4,10 @@
   'project-key': 'AGH'
   'key': 'AGHBSNAPSPECS'
   'name': 'AdGuard Home - Build and publish release'
+# Make sure to sync any changes with the branch overrides below.
 'variables':
   'channel': 'edge'
-  'dockerGo': 'adguard/golang-ubuntu:2.0'
+  'dockerGo': 'adguard/golang-ubuntu:3.3'
 
 'stages':
 - 'Make release':
@@ -33,11 +34,11 @@
     'jobs':
     - 'Publish to Snapstore'
 
-- 'Publish to Github Releases':
+- 'Publish to GitHub Releases':
     'manual': false
     'final': false
     'jobs':
-    - 'Publish to Github Releases'
+    - 'Publish to GitHub Releases'
 
 'Make release':
   'docker':
@@ -151,7 +152,9 @@
 
         cd ./dist/
 
-        export CHANNEL="${bamboo.channel}"
+        CHANNEL="${bamboo.channel}"
+        export CHANNEL
+
         ../bamboo-deploy-publisher/deploy.sh adguard-home-"$CHANNEL"
   'final-tasks':
   - 'clean'
@@ -191,7 +194,7 @@
   'requirements':
   - 'adg-docker': 'true'
 
-'Publish to Github Releases':
+'Publish to GitHub Releases':
   'key': 'PTGR'
   'other':
     'clean-working-dir': true
@@ -212,7 +215,7 @@
         export CHANNEL="${bamboo.channel}"
         if [ "$CHANNEL" != 'release' ] && [ "${CHANNEL}" != 'beta' ]
         then
-              echo "don't publish to Github Releases for this channel"
+              echo "don't publish to GitHub Releases for this channel"
 
               exit 0
         fi
@@ -228,7 +231,9 @@
   - 'adg-docker': 'true'
 
 'triggers':
-- 'cron': '0 30 14 ? * MON-FRI *'
+# Don't use minute values that end with a zero or a five as these are often used
+# in CI and so resources during these minutes can be quite busy.
+- 'cron': '0 42 13 ? * MON-FRI *'
 'branches':
   'create': 'manually'
   'delete':
@@ -250,3 +255,25 @@
 'labels': []
 'other':
   'concurrent-build-plugin': 'system-default'
+
+'branch-overrides':
+# beta-vX.Y branches are the branches into which the commits that are needed to
+# release a new patch version are initially cherry-picked.
+- '^beta-v[0-9]+\.[0-9]+':
+    # Build betas on release branches manually.
+    'triggers': []
+    # Set the default release channel on the release branch to beta, as we may
+    # need to build a few of these.
+    'variables':
+      'channel': 'beta'
+      'dockerGo': 'adguard/golang-ubuntu:3.3'
+# release-vX.Y.Z branches are the branches from which the actual final release
+# is built.
+- '^release-v[0-9]+\.[0-9]+\.[0-9]+':
+    # Build final releases on release branches manually.
+    'triggers': []
+    # Set the default release channel on the final branch to release, as these
+    # are the ones that actually get released.
+    'variables':
+      'channel': 'release'
+      'dockerGo': 'adguard/golang-ubuntu:3.3'

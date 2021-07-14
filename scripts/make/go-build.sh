@@ -2,41 +2,48 @@
 
 # AdGuard Home Build Script
 #
-# The commentary in this file is written with the assumption that the
-# reader only has superficial knowledge of the POSIX shell language and
-# alike.  Experienced readers may find it overly verbose.
+# The commentary in this file is written with the assumption that the reader
+# only has superficial knowledge of the POSIX shell language and alike.
+# Experienced readers may find it overly verbose.
 
-# The default verbosity level is 0.  Show every command that is run and
-# every package that is processed if the caller requested verbosity
-# level greater than 0.  Also show subcommands if the requested
-# verbosity level is greater than 1.  Otherwise, do nothing.
+# The default verbosity level is 0.  Show every command that is run and every
+# package that is processed if the caller requested verbosity level greater than
+# 0.  Also show subcommands if the requested verbosity level is greater than 1.
+# Otherwise, do nothing.
 verbose="${VERBOSE:-0}"
+readonly verbose
+
 if [ "$verbose" -gt '1' ]
 then
 	env
 	set -x
-	readonly v_flags='-v'
-	readonly x_flags='-x'
+	v_flags='-v=1'
+	x_flags='-x=1'
 elif [ "$verbose" -gt '0' ]
 then
 	set -x
-	readonly v_flags='-v'
-	readonly x_flags=''
+	v_flags='-v=1'
+	x_flags='-x=0'
 else
 	set +x
-	readonly v_flags=''
-	readonly x_flags=''
+	v_flags='-v=0'
+	x_flags='-x=0'
 fi
+readonly x_flags v_flags
 
 # Exit the script if a pipeline fails (-e), prevent accidental filename
 # expansion (-f), and consider undefined variables as errors (-u).
 set -e -f -u
 
-# Allow users to set the Go version.
+# Allow users to override the go command from environment.  For example, to
+# build two releases with two different Go versions and test the difference.
 go="${GO:-go}"
+readonly go
 
 # Require the channel to be set and validate the value.
-channel="$CHANNEL"
+channel="${CHANNEL:?please set CHANNEL}"
+readonly channel
+
 case "$channel"
 in
 ('development'|'edge'|'beta'|'release')
@@ -49,18 +56,25 @@ in
 	;;
 esac
 
-# Require the version to be set.
-#
-# TODO(a.garipov): Additional validation?
-version="$VERSION"
+# Check VERSION against the default value from the Makefile.  If it is that, use
+# the version calculation script.
+version="${VERSION:-}"
+if [ "$version" = 'v0.0.0' ] || [ "$version" = '' ]
+then
+	version="$( sh ./scripts/make/version.sh )"
+fi
+readonly version
 
-# Set date and time of the current build.
-buildtime="$(date -u +%FT%TZ%z)"
+# Set date and time of the current build unless already set.
+buildtime="${BUILD_TIME:-$( date -u +%FT%TZ%z )}"
+readonly buildtime
 
-# Set the linker flags accordingly: set the release channel and the
-# current version as well as goarm and gomips variable values, if the
-# variables are set and are not empty.
-readonly version_pkg='github.com/AdguardTeam/AdGuardHome/internal/version'
+# Set the linker flags accordingly: set the release channel and the current
+# version as well as goarm and gomips variable values, if the variables are set
+# and are not empty.
+version_pkg='github.com/AdguardTeam/AdGuardHome/internal/version'
+readonly version_pkg
+
 ldflags="-s -w"
 ldflags="${ldflags} -X ${version_pkg}.version=${version}"
 ldflags="${ldflags} -X ${version_pkg}.channel=${channel}"
@@ -74,42 +88,39 @@ then
 fi
 
 # Allow users to limit the build's parallelism.
-readonly parallelism="${PARALLELISM:-}"
-if [ "$parallelism" != '' ]
+parallelism="${PARALLELISM:-}"
+readonly parallelism
+
+# Use GOFLAGS for -p, because -p=0 simply disables the build instead of leaving
+# the default value.
+if [ "${parallelism}" != '' ]
 then
-	readonly par_flags="-p ${parallelism}"
-else
-	readonly par_flags=''
+        GOFLAGS="${GOFLAGS:-} -p=${parallelism}"
 fi
+readonly GOFLAGS
+export GOFLAGS
 
 # Allow users to specify a different output name.
-readonly out="${OUT:-}"
-if [ "$out" != '' ]
+out="${OUT:-AdGuardHome}"
+readonly out
+
+o_flags="-o=${out}"
+readonly o_flags
+
+# Allow users to enable the race detector.  Unfortunately, that means that cgo
+# must be enabled.
+if [ "${RACE:-0}" -eq '0' ]
 then
-	readonly out_flags="-o ${out}"
+	cgo_enabled='0'
+	race_flags='--race=0'
 else
-	readonly out_flags=''
+	cgo_enabled='1'
+	race_flags='--race=1'
 fi
+readonly cgo_enabled race_flags
 
-# Allow users to enable the race detector.  Unfortunately, that means
-# that CGo must be enabled.
-readonly race="${RACE:-0}"
-if [ "$race" = '0' ]
-then
-	readonly cgo_enabled='0'
-	readonly race_flags=''
-else
-	readonly cgo_enabled='1'
-	readonly race_flags='--race'
-fi
+CGO_ENABLED="$cgo_enabled"
+GO111MODULE='on'
+export CGO_ENABLED GO111MODULE
 
-export CGO_ENABLED="$cgo_enabled"
-export GO111MODULE='on'
-
-readonly build_flags="${BUILD_FLAGS:-$race_flags $out_flags $par_flags $v_flags $x_flags}"
-
-# Don't use quotes with flag variables to get word splitting.
-"$go" generate $v_flags $x_flags ./main.go
-
-# Don't use quotes with flag variables to get word splitting.
-"$go" build --ldflags "$ldflags" $build_flags
+"$go" build --ldflags "$ldflags" "$race_flags" --trimpath "$o_flags" "$v_flags" "$x_flags"

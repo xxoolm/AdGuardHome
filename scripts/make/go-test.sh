@@ -1,6 +1,7 @@
 #!/bin/sh
 
 verbose="${VERBOSE:-0}"
+readonly verbose
 
 # Verbosity levels:
 #   0 = Don't print anything except for errors.
@@ -9,34 +10,35 @@ verbose="${VERBOSE:-0}"
 if [ "$verbose" -gt '1' ]
 then
 	set -x
-	v_flags='-v'
-	x_flags='-x'
+	v_flags='-v=1'
+	x_flags='-x=1'
 elif [ "$verbose" -gt '0' ]
 then
 	set -x
-	v_flags='-v'
-	x_flags=''
+	v_flags='-v=1'
+	x_flags='-x=0'
 else
 	set +x
-	v_flags=''
-	x_flags=''
+	v_flags='-v=0'
+	x_flags='-x=0'
 fi
+readonly v_flags x_flags
 
 set -e -f -u
 
-race="${RACE:-1}"
-if [ "$race" = '0' ]
+if [ "${RACE:-1}" -eq '0' ]
 then
-	race_flags=''
+	race_flags='--race=0'
 else
-	race_flags='--race'
+	race_flags='--race=1'
 fi
+readonly race_flags
 
-readonly go="${GO:-go}"
-readonly timeout_flags="${TIMEOUT_FLAGS:---timeout 30s}"
-readonly cover_flags='--coverprofile ./coverage.txt'
-readonly count_flags='--count 1'
+go="${GO:-go}"
 
-# Don't use quotes with flag variables because we want an empty space if
-# those aren't set.
-"$go" test $count_flags $cover_flags $race_flags $timeout_flags $x_flags $v_flags ./...
+count_flags='--count=1'
+cover_flags='--coverprofile=./coverage.txt'
+timeout_flags="${TIMEOUT_FLAGS:---timeout=30s}"
+readonly go timeout_flags cover_flags count_flags
+
+"$go" test "$count_flags" "$cover_flags" "$race_flags" "$timeout_flags" "$x_flags" "$v_flags" ./...

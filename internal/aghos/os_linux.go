@@ -1,35 +1,22 @@
+//go:build linux
 // +build linux
 
 package aghos
 
 import (
 	"bytes"
-	"io/ioutil"
 	"os"
 	"path/filepath"
 	"strings"
 	"syscall"
-
-	"github.com/AdguardTeam/golibs/log"
-	"golang.org/x/sys/unix"
 )
 
-func canBindPrivilegedPorts() (can bool, err error) {
-	cnbs, err := unix.PrctlRetInt(unix.PR_CAP_AMBIENT, unix.PR_CAP_AMBIENT_IS_SET, unix.CAP_NET_BIND_SERVICE, 0, 0)
-	// Don't check the error because it's always nil on Linux.
-	adm, _ := haveAdminRights()
-
-	return cnbs == 1 || adm, err
-}
-
-func setRlimit(val uint) {
+func setRlimit(val uint64) (err error) {
 	var rlim syscall.Rlimit
-	rlim.Max = uint64(val)
-	rlim.Cur = uint64(val)
-	err := syscall.Setrlimit(syscall.RLIMIT_NOFILE, &rlim)
-	if err != nil {
-		log.Error("Setrlimit() failed: %v", err)
-	}
+	rlim.Max = val
+	rlim.Cur = val
+
+	return syscall.Setrlimit(syscall.RLIMIT_NOFILE, &rlim)
 }
 
 func haveAdminRights() (bool, error) {
@@ -45,9 +32,7 @@ func sendProcessSignal(pid int, sig syscall.Signal) error {
 func isOpenWrt() (ok bool) {
 	const etcDir = "/etc"
 
-	// TODO(e.burkov): Take care of dealing with fs package after updating
-	// Go version to 1.16.
-	fileInfos, err := ioutil.ReadDir(etcDir)
+	dirEnts, err := os.ReadDir(etcDir)
 	if err != nil {
 		return false
 	}
@@ -56,18 +41,18 @@ func isOpenWrt() (ok bool) {
 	const fNameSubstr = "release"
 	osNameData := []byte("OpenWrt")
 
-	for _, fileInfo := range fileInfos {
-		if fileInfo.IsDir() {
+	for _, dirEnt := range dirEnts {
+		if dirEnt.IsDir() {
 			continue
 		}
 
-		fn := fileInfo.Name()
+		fn := dirEnt.Name()
 		if !strings.Contains(fn, fNameSubstr) {
 			continue
 		}
 
 		var body []byte
-		body, err = ioutil.ReadFile(filepath.Join(etcDir, fn))
+		body, err = os.ReadFile(filepath.Join(etcDir, fn))
 		if err != nil {
 			continue
 		}

@@ -1,3 +1,4 @@
+//go:build freebsd
 // +build freebsd
 
 package aghos
@@ -5,22 +6,14 @@ package aghos
 import (
 	"os"
 	"syscall"
-
-	"github.com/AdguardTeam/golibs/log"
 )
 
-func canBindPrivilegedPorts() (can bool, err error) {
-	return HaveAdminRights()
-}
-
-func setRlimit(val uint) {
+func setRlimit(val uint64) (err error) {
 	var rlim syscall.Rlimit
 	rlim.Max = int64(val)
 	rlim.Cur = int64(val)
-	err := syscall.Setrlimit(syscall.RLIMIT_NOFILE, &rlim)
-	if err != nil {
-		log.Error("Setrlimit() failed: %v", err)
-	}
+
+	return syscall.Setrlimit(syscall.RLIMIT_NOFILE, &rlim)
 }
 
 func haveAdminRights() (bool, error) {

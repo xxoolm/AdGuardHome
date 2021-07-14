@@ -1,9 +1,9 @@
  #  AdGuard Home Developer Guidelines
 
-As of **March 2021**, following this document is obligatory for all new code.
-Some of the rules aren't enforced as thoroughly or remain broken in old code,
-but this is still the place to find out about what we **want** our code to look
-like and how to improve it.
+Following this document is obligatory for all new code.  Some of the rules
+aren't enforced as thoroughly or remain broken in old code, but this is still
+the place to find out about what we **want** our code to look like and how to
+improve it.
 
 The rules are mostly sorted in the alphabetical order.
 
@@ -21,15 +21,17 @@ The rules are mostly sorted in the alphabetical order.
      *  [Recommended Reading](#recommended-reading)
  *  [Markdown](#markdown)
  *  [Shell Scripting](#shell-scripting)
+     *  [Shell Conditionals](#shell-conditionals)
  *  [Text, Including Comments](#text-including-comments)
  *  [YAML](#yaml)
 
 <!-- NOTE: Use the IDs that GitHub would generate in order for this to work both
-on GitHub and most other Markdown renderers. -->
+on GitHub and most other Markdown renderers.  Use both "id" and "name"
+attributes to make it work in Markdown renderers that strip "id". -->
 
 
 
-##  <a id="git" href="#git">Git</a>
+##  <a href="#git" id="git" name="git">Git</a>
 
  *  Call your branches either `NNNN-fix-foo` (where `NNNN` is the ID of the
     GitHub issue you worked on in this branch) or just `fix-foo` if there was no
@@ -55,26 +57,28 @@ on GitHub and most other Markdown renderers. -->
 
 
 
-##  <a id="go" href="#go">Go</a>
+##  <a href="#go" id="go" name="go">Go</a>
 
 > Not Golang, not GO, not GOLANG, not GoLang. It is Go in natural language,
 > golang for others.
 
 — [@rakyll](https://twitter.com/rakyll/status/1229850223184269312)
 
- ###  <a id="code" href="#code">Code</a>
+ ###  <a href="#code" id="code" name="code">Code</a>
 
  *  Always `recover` from panics in new goroutines.  Preferably in the very
-    first statement.  If all you want there is a log message, use
-    `agherr.LogPanic`.
+    first statement.  If all you want there is a log message, use `log.OnPanic`.
 
- *  Avoid `errors.New`, use `aghnet.Error` instead.
+ *  Avoid `fallthrough`.  It makes it harder to rearrange `case`s, to reason
+    about the code, and also to switch the code to a handler approach, if that
+    becomes necessary later.
 
  *  Avoid `goto`.
 
  *  Avoid `init` and use explicit initialization functions instead.
 
- *  Avoid `new`, especially with structs.
+ *  Avoid `new`, especially with structs, unless a temporary value is needed,
+    for example when checking the type of an error using `errors.As`.
 
  *  Check against empty strings like this:
 
@@ -95,6 +99,10 @@ on GitHub and most other Markdown renderers. -->
  *  Constructors should validate their arguments and return meaningful errors.
     As a corollary, avoid lazy initialization.
 
+ *  Prefer to define methods on pointer receievers, unless the type is small or
+    a non-pointer receiever is required, for example `MarshalFoo` methods (see
+    [staticcheck-911]).
+
  *  Don't mix horizontal and vertical placement of arguments in function and
     method calls.  That is, either this:
 
@@ -112,6 +120,15 @@ on GitHub and most other Markdown renderers. -->
     )
     ```
 
+    Or, with a struct literal:
+
+    ```go
+    err := functionWithALongName(arg, structType{
+            field1: val1,
+            field2: val2,
+    })
+    ```
+
     But **never** this:
 
     ```go
@@ -121,9 +138,12 @@ on GitHub and most other Markdown renderers. -->
     )
     ```
 
+ *  Don't rely only on file names for build tags to work.  Always add build tags
+    as well.
+
  *  Don't use `fmt.Sprintf` where a more structured approach to string
-    conversion could be used.  For example, `net.JoinHostPort` or
-    `url.(*URL).String`.
+    conversion could be used.  For example, `aghnet.JoinHostPort`,
+    `net.JoinHostPort` or `url.(*URL).String`.
 
  *  Don't use naked `return`s.
 
@@ -134,16 +154,21 @@ on GitHub and most other Markdown renderers. -->
     The exception proving the rule is the table-driven test code, where an
     additional level of indentation is allowed.
 
- *  Eschew external dependencies, including transitive, unless
-    absolutely necessary.
+ *  Eschew external dependencies, including transitive, unless absolutely
+    necessary.
 
  *  Minimize scope of variables as much as possible.
 
- *  No shadowing, since it can often lead to subtle bugs, especially with
-    errors.
+ *  No name shadowing, including of predeclared identifiers, since it can often
+    lead to subtle bugs, especially with errors.  This rule does not apply to
+    struct fields, since they are always used together with the name of the
+    struct value, so there isn't any confusion.
 
- *  Prefer constants to variables where possible.  Reduce global variables.  Use
+ *  Prefer constants to variables where possible.  Avoid global variables.  Use
     [constant errors] instead of `errors.New`.
+
+ *  Prefer defining `Foo.String` and `ParseFoo` in terms of `Foo.MarshalText`
+    and `Foo.UnmarshalText` correspondingly and not the other way around.
 
  *  Prefer to use named functions for goroutines.
 
@@ -155,7 +180,7 @@ on GitHub and most other Markdown renderers. -->
  *  Write logs and error messages in lowercase only to make it easier to `grep`
     logs and error messages without using the `-i` flag.
 
- ###  <a id="commenting" href="#commenting">Commenting</a>
+ ###  <a href="#commenting" id="commenting" name="commenting">Commenting</a>
 
  *  See also the “[Text, Including Comments]” section below.
 
@@ -186,10 +211,25 @@ on GitHub and most other Markdown renderers. -->
     }
     ```
 
- ###  <a id="formatting" href="#formatting">Formatting</a>
+ ###  <a href="#formatting" id="formatting" name="formatting">Formatting</a>
 
- *  Decorate `break`, `continue`, `fallthrough`, `return`, and other function
-    exit points with empty lines unless it's the only statement in that block.
+ *  Decorate `break`, `continue`, `return`, and other terminating statements
+    with empty lines unless it's the only statement in that block.
+
+ *  Don't group type declarations together.  Unlike with blocks of `const`s,
+    where a `iota` may be used or where all constants belong to a certain type,
+    there is no reason to group `type`s.
+
+ *  Group `require.*` blocks together with the presceding related statements,
+    but separate from the following `assert.*` and unrelated requirements.
+
+    ```go
+    val, ok := valMap[key]
+    require.True(t, ok)
+    require.NotNil(t, val)
+
+    assert.Equal(t, expected, val)
+    ```
 
  *  Use `gofumpt --extra -s`.
 
@@ -208,7 +248,7 @@ on GitHub and most other Markdown renderers. -->
     }}
     ```
 
- ###  <a id="naming" href="#naming">Naming</a>
+ ###  <a href="#naming" id="naming" name="naming">Naming</a>
 
  *  Don't use underscores in file and package names, unless they're build tags
     or for tests.  This is to prevent accidental build errors with weird tags.
@@ -243,7 +283,7 @@ on GitHub and most other Markdown renderers. -->
 
  *  Use named returns to improve readability of function signatures.
 
- *  When naming a file which defines an enitity, use singular nouns, unless the
+ *  When naming a file which defines an entity, use singular nouns, unless the
     entity is some form of a container for other entities:
 
     ```go
@@ -270,15 +310,18 @@ on GitHub and most other Markdown renderers. -->
     }
     ```
 
- ###  <a id="testing" href="#testing">Testing</a>
+ ###  <a href="#testing" id="testing" name="testing">Testing</a>
 
  *  Use `assert.NoError` and `require.NoError` instead of `assert.Nil` and
     `require.Nil` on errors.
 
+ *  Use formatted helpers, like `assert.Nilf` or `require.Nilf`, instead of
+    simple helpers when a formatted message is required.
+
  *  Use functions like `require.Foo` instead of `assert.Foo` when the test
     cannot continue if the condition is false.
 
- ###  <a id="recommended-reading" href="#recommended-reading">Recommended Reading</a>
+ ###  <a href="#recommended-reading" id="recommended-reading" name="recommended-reading">Recommended Reading</a>
 
  *  <https://github.com/golang/go/wiki/CodeReviewComments>.
 
@@ -286,13 +329,14 @@ on GitHub and most other Markdown renderers. -->
 
  *  <https://go-proverbs.github.io/>
 
-[constant errors]:          https://dave.cheney.net/2016/04/07/constant-errors
 [Linus said]:               https://www.kernel.org/doc/html/v4.17/process/coding-style.html#indentation
 [Text, Including Comments]: #text-including-comments
+[constant errors]:          https://dave.cheney.net/2016/04/07/constant-errors
+[staticcheck-911]:          https://github.com/dominikh/go-tools/issues/911
 
 
 
-##  <a id="markdown" href="#markdown">Markdown</a>
+##  <a href="#markdown" id="markdown" name="markdown">Markdown</a>
 
  *  **TODO(a.garipov):** Define more Markdown conventions.
 
@@ -305,9 +349,31 @@ on GitHub and most other Markdown renderers. -->
 
 
 
-##  <a id="shell-scripting" href="#shell-scripting">Shell Scripting</a>
+##  <a href="#shell-scripting" id="shell-scripting" name="shell-scripting">Shell Scripting</a>
 
  *  Avoid bashisms and GNUisms, prefer POSIX features only.
+
+ *  Avoid spaces between patterns of the same `case` condition.
+
+ *  `export` and `readonly` should be used separately from variable assignment,
+    because otherwise failures in command substitutions won't stop the script.
+    That is, do this:
+
+    ```sh
+    X="$( echo 42 )"
+    export X
+    ```
+
+    And **not** this:
+
+    ```sh
+    # Bad!
+    export X="$( echo 42 )"
+    ```
+
+ *  If a binary value is needed, use `0` for `false`, and `1` for `true`.
+
+ *  Mark every variable that shouldn't change later as `readonly`.
 
  *  Prefer `'raw strings'` to `"double quoted strings"` whenever possible.
 
@@ -321,12 +387,17 @@ on GitHub and most other Markdown renderers. -->
 
  *  `snake_case`, not `camelCase` for variables.  `kebab-case` for filenames.
 
+ *  Start scripts with the following sections in the following order:
+
+    1.  Shebang.
+    1.  Some initial documentation (optional).
+    1.  Verbosity level parsing (optional).
+    1.  `set` options.
+
  *  UPPERCASE names for external exported variables, lowercase for local,
     unexported ones.
 
  *  Use `set -e -f -u` and also `set -x` in verbose mode.
-
- *  Use `readonly` liberally.
 
  *  Use the `"$var"` form instead of the `$var` form, unless word splitting is
     required.
@@ -349,20 +420,43 @@ on GitHub and most other Markdown renderers. -->
     dir="${TOP_DIR}"/sub
     ```
 
- *  When using `test` (aka `[`), spell compound conditions with `&&`, `||`, and
-    `!` **outside** of `test` instead of `-a`, `-o`, and `!` inside of `test`
-    correspondingly.  The latter ones are pretty much deprecated in POSIX.
+ ###  <a href="#shell-conditionals" id="shell-conditionals" name="shell-conditionals">Shell Conditionals</a>
 
-    See also: “[Problems With the `test` Builtin: What Does `-a` Mean?]”.
+Guidelines and agreements for using command `test`, also known as `[`:
 
-    [Problems With the `test` Builtin: What Does `-a` Mean?]: https://www.oilshell.org/blog/2017/08/31.html
+ *  For conditionals that check for equality against multiple values, prefer
+    `case` instead of `test`.
 
-##  <a id="text-including-comments" href="#text-including-comments">Text, Including Comments</a>
+ *  Prefer the `!= ''` form instead of using `-n` to check if string is empty.
+
+ *  Spell compound conditions with `&&`, `||`, and `!` **outside** of `test`
+    instead of `-a`, `-o`, and `!` **inside** of `test` correspondingly.  The
+    latter ones are pretty much deprecated in POSIX.
+
+    See also: “[Problems With the `test` Builtin: What Does `-a` Mean?][test]”.
+
+ *  Use `=` for strings and `-eq` for numbers to catch typing errors.
+
+[test]: https://www.oilshell.org/blog/2017/08/31.html
+
+
+
+##  <a href="#text-including-comments" id="text-including-comments" name="text-including-comments">Text, Including Comments</a>
 
  *  End sentences with appropriate punctuation.
 
  *  Headers should be written with all initial letters capitalized, except for
     references to variable names that start with a lowercase letter.
+
+ *  Mark temporary todos—that is, todos that must be resolved or removed before
+    publishing a change—with two exclamation signs:
+
+    ```go
+    // TODO(usr1): !! Remove this debug before pushing!
+    ```
+
+    This makes it easier to find them both during development and during code
+    review.
 
  *  Start sentences with a capital letter, unless the first word is a reference
     to a variable name that starts with a lowercase letter.
@@ -393,7 +487,9 @@ on GitHub and most other Markdown renderers. -->
     // TODO(usr1, usr2): Fix the frobulation issue.
     ```
 
-##  <a id="yaml" href="#yaml">YAML</a>
+
+
+##  <a href="#yaml" id="yaml" name="yaml">YAML</a>
 
  *  **TODO(a.garipov):** Define naming conventions for schema names in our
     OpenAPI YAML file.  And just generally OpenAPI conventions.

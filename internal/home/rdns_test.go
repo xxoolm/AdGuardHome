@@ -3,19 +3,21 @@ package home
 import (
 	"bytes"
 	"encoding/binary"
-	"errors"
 	"net"
 	"sync"
 	"testing"
 	"time"
 
+	"github.com/AdguardTeam/AdGuardHome/internal/aghnet"
 	"github.com/AdguardTeam/AdGuardHome/internal/aghstrings"
 	"github.com/AdguardTeam/AdGuardHome/internal/aghtest"
 	"github.com/AdguardTeam/dnsproxy/upstream"
 	"github.com/AdguardTeam/golibs/cache"
+	"github.com/AdguardTeam/golibs/errors"
 	"github.com/AdguardTeam/golibs/log"
 	"github.com/miekg/dns"
 	"github.com/stretchr/testify/assert"
+	"github.com/stretchr/testify/require"
 )
 
 func TestRDNS_Begin(t *testing.T) {
@@ -78,11 +80,12 @@ func TestRDNS_Begin(t *testing.T) {
 		binary.BigEndian.PutUint64(ttl, uint64(time.Now().Add(100*time.Hour).Unix()))
 
 		rdns := &RDNS{
-			ipCache: ipCache,
+			ipCache:   ipCache,
+			exchanger: &rDNSExchanger{},
 			clients: &clientsContainer{
 				list:    map[string]*Client{},
 				idIndex: tc.cliIDIndex,
-				ipToRC:  map[string]*RuntimeClient{},
+				ipToRC:  aghnet.NewIPMap(0),
 				allTags: aghstrings.NewSet(),
 			},
 		}
@@ -105,7 +108,8 @@ func TestRDNS_Begin(t *testing.T) {
 
 // rDNSExchanger is a mock dnsforward.RDNSExchanger implementation for tests.
 type rDNSExchanger struct {
-	aghtest.Exchanger
+	ex         aghtest.Exchanger
+	usePrivate bool
 }
 
 // Exchange implements dnsforward.RDNSExchanger interface for *RDNSExchanger.
@@ -117,7 +121,7 @@ func (e *rDNSExchanger) Exchange(ip net.IP) (host string, err error) {
 		}},
 	}
 
-	resp, err := e.Exchanger.Exchange(req)
+	resp, err := e.ex.Exchange(req)
 	if err != nil {
 		return "", err
 	}
@@ -127,6 +131,35 @@ func (e *rDNSExchanger) Exchange(ip net.IP) (host string, err error) {
 	}
 
 	return resp.Answer[0].Header().Name, nil
+}
+
+// Exchange implements dnsforward.RDNSExchanger interface for *RDNSExchanger.
+func (e *rDNSExchanger) ResolvesPrivatePTR() (ok bool) {
+	return e.usePrivate
+}
+
+func TestRDNS_ensurePrivateCache(t *testing.T) {
+	data := []byte{1, 2, 3, 4}
+
+	ipCache := cache.New(cache.Config{
+		EnableLRU: true,
+		MaxCount:  defaultRDNSCacheSize,
+	})
+
+	ex := &rDNSExchanger{}
+
+	rdns := &RDNS{
+		ipCache:   ipCache,
+		exchanger: ex,
+	}
+
+	rdns.ipCache.Set(data, data)
+	require.NotZero(t, rdns.ipCache.Stats().Count)
+
+	ex.usePrivate = !ex.usePrivate
+
+	rdns.ensurePrivateCache()
+	require.Zero(t, rdns.ipCache.Stats().Count)
 }
 
 func TestRDNS_WorkerLoop(t *testing.T) {
@@ -141,7 +174,7 @@ func TestRDNS_WorkerLoop(t *testing.T) {
 		},
 	}
 	errUpstream := &aghtest.TestErrUpstream{
-		Err: errors.New("1234"),
+		Err: errors.Error("1234"),
 	}
 
 	testCases := []struct {
@@ -172,13 +205,13 @@ func TestRDNS_WorkerLoop(t *testing.T) {
 		cc := &clientsContainer{
 			list:    map[string]*Client{},
 			idIndex: map[string]*Client{},
-			ipToRC:  map[string]*RuntimeClient{},
+			ipToRC:  aghnet.NewIPMap(0),
 			allTags: aghstrings.NewSet(),
 		}
 		ch := make(chan net.IP)
 		rdns := &RDNS{
 			exchanger: &rDNSExchanger{
-				Exchanger: aghtest.Exchanger{
+				ex: aghtest.Exchanger{
 					Ups: tc.ups,
 				},
 			},
@@ -204,7 +237,7 @@ func TestRDNS_WorkerLoop(t *testing.T) {
 				return
 			}
 
-			assert.True(t, cc.Exists(tc.cliIP.String(), ClientSourceRDNS))
+			assert.True(t, cc.Exists(tc.cliIP, ClientSourceRDNS))
 		})
 	}
 }

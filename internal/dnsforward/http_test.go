@@ -3,7 +3,7 @@ package dnsforward
 import (
 	"bytes"
 	"encoding/json"
-	"io/ioutil"
+	"io"
 	"net"
 	"net/http"
 	"net/http/httptest"
@@ -12,10 +12,25 @@ import (
 	"strings"
 	"testing"
 
-	"github.com/AdguardTeam/AdGuardHome/internal/dnsfilter"
+	"github.com/AdguardTeam/AdGuardHome/internal/aghnet"
+	"github.com/AdguardTeam/AdGuardHome/internal/filtering"
 	"github.com/stretchr/testify/assert"
 	"github.com/stretchr/testify/require"
 )
+
+// fakeSystemResolvers is a mock aghnet.SystemResolvers implementation for
+// tests.
+type fakeSystemResolvers struct {
+	// SystemResolvers is embedded here simply to make *fakeSystemResolvers
+	// an aghnet.SystemResolvers without actually implementing all methods.
+	aghnet.SystemResolvers
+}
+
+// Get implements the aghnet.SystemResolvers interface for *fakeSystemResolvers.
+// It always returns nil.
+func (fsr *fakeSystemResolvers) Get() (rs []string) {
+	return nil
+}
 
 func loadTestData(t *testing.T, casesFileName string, cases interface{}) {
 	t.Helper()
@@ -33,8 +48,8 @@ func loadTestData(t *testing.T, casesFileName string, cases interface{}) {
 
 const jsonExt = ".json"
 
-func TestDNSForwardHTTTP_handleGetConfig(t *testing.T) {
-	filterConf := &dnsfilter.Config{
+func TestDNSForwardHTTP_handleGetConfig(t *testing.T) {
+	filterConf := &filtering.Config{
 		SafeBrowsingEnabled:   true,
 		SafeBrowsingCacheSize: 1000,
 		SafeSearchEnabled:     true,
@@ -52,6 +67,8 @@ func TestDNSForwardHTTTP_handleGetConfig(t *testing.T) {
 		ConfigModified: func() {},
 	}
 	s := createTestServer(t, filterConf, forwardConf, nil)
+	s.sysResolvers = &fakeSystemResolvers{}
+
 	require.Nil(t, s.Start())
 	t.Cleanup(func() {
 		require.Nil(t, s.Stop())
@@ -106,8 +123,8 @@ func TestDNSForwardHTTTP_handleGetConfig(t *testing.T) {
 	}
 }
 
-func TestDNSForwardHTTTP_handleSetConfig(t *testing.T) {
-	filterConf := &dnsfilter.Config{
+func TestDNSForwardHTTP_handleSetConfig(t *testing.T) {
+	filterConf := &filtering.Config{
 		SafeBrowsingEnabled:   true,
 		SafeBrowsingCacheSize: 1000,
 		SafeSearchEnabled:     true,
@@ -125,6 +142,7 @@ func TestDNSForwardHTTTP_handleSetConfig(t *testing.T) {
 		ConfigModified: func() {},
 	}
 	s := createTestServer(t, filterConf, forwardConf, nil)
+	s.sysResolvers = &fakeSystemResolvers{}
 
 	defaultConf := s.conf
 
@@ -207,7 +225,7 @@ func TestDNSForwardHTTTP_handleSetConfig(t *testing.T) {
 				s.conf = defaultConf
 			})
 
-			rBody := ioutil.NopCloser(bytes.NewReader(caseData.Req))
+			rBody := io.NopCloser(bytes.NewReader(caseData.Req))
 			var r *http.Request
 			r, err = http.NewRequest(http.MethodPost, "http://example.com", rBody)
 			require.Nil(t, err)

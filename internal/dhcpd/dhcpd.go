@@ -10,6 +10,7 @@ import (
 	"runtime"
 	"time"
 
+	"github.com/AdguardTeam/AdGuardHome/internal/aghnet"
 	"github.com/AdguardTeam/golibs/log"
 )
 
@@ -27,13 +28,44 @@ var webHandlersRegistered = false
 
 // Lease contains the necessary information about a DHCP lease
 type Lease struct {
+	// Expiry is the expiration time of the lease.  The unix timestamp value
+	// of 1 means that this is a static lease.
+	Expiry time.Time `json:"expires"`
+
+	Hostname string           `json:"hostname"`
 	HWAddr   net.HardwareAddr `json:"mac"`
 	IP       net.IP           `json:"ip"`
-	Hostname string           `json:"hostname"`
+}
 
-	// Lease expiration time
-	// 1: static lease
-	Expiry time.Time `json:"expires"`
+// Clone returns a deep copy of l.
+func (l *Lease) Clone() (clone *Lease) {
+	if l == nil {
+		return nil
+	}
+
+	return &Lease{
+		Expiry:   l.Expiry,
+		Hostname: l.Hostname,
+		HWAddr:   aghnet.CloneMAC(l.HWAddr),
+		IP:       aghnet.CloneIP(l.IP),
+	}
+}
+
+// IsBlocklisted returns true if the lease is blocklisted.
+//
+// TODO(a.garipov): Just make it a boolean field.
+func (l *Lease) IsBlocklisted() (ok bool) {
+	if len(l.HWAddr) == 0 {
+		return false
+	}
+
+	for _, b := range l.HWAddr {
+		if b != 0 {
+			return false
+		}
+	}
+
+	return true
 }
 
 // IsStatic returns true if the lease is static.
@@ -43,8 +75,8 @@ func (l *Lease) IsStatic() (ok bool) {
 	return l != nil && l.Expiry.Unix() == leaseExpireStatic
 }
 
-// MarshalJSON implements the json.Marshaler interface for *Lease.
-func (l *Lease) MarshalJSON() ([]byte, error) {
+// MarshalJSON implements the json.Marshaler interface for Lease.
+func (l Lease) MarshalJSON() ([]byte, error) {
 	var expiryStr string
 	if !l.IsStatic() {
 		// The front-end is waiting for RFC 3999 format of the time
@@ -59,11 +91,11 @@ func (l *Lease) MarshalJSON() ([]byte, error) {
 	return json.Marshal(&struct {
 		HWAddr string `json:"mac"`
 		Expiry string `json:"expires,omitempty"`
-		*lease
+		lease
 	}{
 		HWAddr: l.HWAddr.String(),
 		Expiry: expiryStr,
-		lease:  (*lease)(l),
+		lease:  lease(l),
 	})
 }
 
@@ -71,8 +103,8 @@ func (l *Lease) MarshalJSON() ([]byte, error) {
 func (l *Lease) UnmarshalJSON(data []byte) (err error) {
 	type lease Lease
 	aux := struct {
-		HWAddr string `json:"mac"`
 		*lease
+		HWAddr string `json:"mac"`
 	}{
 		lease: (*lease)(l),
 	}
@@ -131,15 +163,27 @@ type Server struct {
 	onLeaseChanged []OnLeaseChangedT
 }
 
+// GetLeasesFlags are the flags for GetLeases.
+type GetLeasesFlags uint8
+
+// GetLeasesFlags values
+const (
+	LeasesDynamic GetLeasesFlags = 0b0001
+	LeasesStatic  GetLeasesFlags = 0b0010
+
+	LeasesAll = LeasesDynamic | LeasesStatic
+)
+
 // ServerInterface is an interface for servers.
 type ServerInterface interface {
-	Leases(flags int) []Lease
+	Enabled() (ok bool)
+	Leases(flags GetLeasesFlags) (leases []*Lease)
 	SetOnLeaseChanged(onLeaseChanged OnLeaseChangedT)
 }
 
 // Create - create object
-func Create(conf ServerConfig) *Server {
-	s := &Server{}
+func Create(conf ServerConfig) (s *Server, err error) {
+	s = &Server{}
 
 	s.conf.Enabled = conf.Enabled
 	s.conf.InterfaceName = conf.InterfaceName
@@ -165,15 +209,18 @@ func Create(conf ServerConfig) *Server {
 		webHandlersRegistered = true
 	}
 
-	var err4, err6 error
 	v4conf := conf.Conf4
 	v4conf.Enabled = s.conf.Enabled
 	if len(v4conf.RangeStart) == 0 {
 		v4conf.Enabled = false
 	}
+
 	v4conf.InterfaceName = s.conf.InterfaceName
 	v4conf.notify = s.onNotify
-	s.srv4, err4 = v4Create(v4conf)
+	s.srv4, err = v4Create(v4conf)
+	if err != nil {
+		return nil, fmt.Errorf("creating dhcpv4 srv: %w", err)
+	}
 
 	v6conf := conf.Conf6
 	v6conf.Enabled = s.conf.Enabled
@@ -182,35 +229,57 @@ func Create(conf ServerConfig) *Server {
 	}
 	v6conf.InterfaceName = s.conf.InterfaceName
 	v6conf.notify = s.onNotify
-	s.srv6, err6 = v6Create(v6conf)
-
-	if err4 != nil {
-		log.Error("%s", err4)
-		return nil
-	}
-	if err6 != nil {
-		log.Error("%s", err6)
-		return nil
+	s.srv6, err = v6Create(v6conf)
+	if err != nil {
+		return nil, fmt.Errorf("creating dhcpv6 srv: %w", err)
 	}
 
 	s.conf.Conf4 = conf.Conf4
 	s.conf.Conf6 = conf.Conf6
 
 	if s.conf.Enabled && !v4conf.Enabled && !v6conf.Enabled {
-		log.Error("Can't enable DHCP server because neither DHCPv4 nor DHCPv6 servers are configured")
-		return nil
+		return nil, fmt.Errorf("neither dhcpv4 nor dhcpv6 srv is configured")
 	}
 
-	// we can't delay database loading until DHCP server is started,
-	//  because we need static leases functionality available beforehand
-	s.dbLoad()
-	return s
+	// Don't delay database loading until the DHCP server is started,
+	// because we need static leases functionality available beforehand.
+	err = s.dbLoad()
+	if err != nil {
+		return nil, fmt.Errorf("loading db: %w", err)
+	}
+
+	return s, nil
+}
+
+// Enabled returns true when the server is enabled.
+func (s *Server) Enabled() (ok bool) {
+	return s.conf.Enabled
+}
+
+// resetLeases resets all leases in the lease database.
+func (s *Server) resetLeases() (err error) {
+	err = s.srv4.ResetLeases(nil)
+	if err != nil {
+		return err
+	}
+
+	if s.srv6 != nil {
+		err = s.srv6.ResetLeases(nil)
+		if err != nil {
+			return err
+		}
+	}
+
+	return s.dbStore()
 }
 
 // server calls this function after DB is updated
 func (s *Server) onNotify(flags uint32) {
 	if flags == LeaseChangedDBStore {
-		s.dbStore()
+		err := s.dbStore()
+		if err != nil {
+			log.Error("updating db: %s", err)
+		}
 
 		return
 	}
@@ -257,21 +326,23 @@ func (s *Server) Start() (err error) {
 }
 
 // Stop closes the listening UDP socket
-func (s *Server) Stop() {
-	s.srv4.Stop()
-	s.srv6.Stop()
-}
+func (s *Server) Stop() (err error) {
+	err = s.srv4.Stop()
+	if err != nil {
+		return err
+	}
 
-// flags for Leases() function
-const (
-	LeasesDynamic = 1
-	LeasesStatic  = 2
-	LeasesAll     = LeasesDynamic | LeasesStatic
-)
+	err = s.srv6.Stop()
+	if err != nil {
+		return err
+	}
+
+	return nil
+}
 
 // Leases returns the list of active IPv4 and IPv6 DHCP leases.  It's safe for
 // concurrent use.
-func (s *Server) Leases(flags int) (leases []Lease) {
+func (s *Server) Leases(flags GetLeasesFlags) (leases []*Lease) {
 	return append(s.srv4.GetLeases(flags), s.srv6.GetLeases(flags)...)
 }
 
@@ -284,6 +355,6 @@ func (s *Server) FindMACbyIP(ip net.IP) net.HardwareAddr {
 }
 
 // AddStaticLease - add static v4 lease
-func (s *Server) AddStaticLease(lease Lease) error {
-	return s.srv4.AddStaticLease(lease)
+func (s *Server) AddStaticLease(l *Lease) error {
+	return s.srv4.AddStaticLease(l)
 }

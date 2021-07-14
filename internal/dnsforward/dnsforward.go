@@ -2,31 +2,35 @@
 package dnsforward
 
 import (
-	"errors"
 	"fmt"
 	"net"
 	"net/http"
-	"os"
 	"runtime"
 	"strings"
 	"sync"
 	"time"
 
-	"github.com/AdguardTeam/AdGuardHome/internal/agherr"
 	"github.com/AdguardTeam/AdGuardHome/internal/aghnet"
 	"github.com/AdguardTeam/AdGuardHome/internal/aghstrings"
 	"github.com/AdguardTeam/AdGuardHome/internal/dhcpd"
-	"github.com/AdguardTeam/AdGuardHome/internal/dnsfilter"
+	"github.com/AdguardTeam/AdGuardHome/internal/filtering"
 	"github.com/AdguardTeam/AdGuardHome/internal/querylog"
 	"github.com/AdguardTeam/AdGuardHome/internal/stats"
 	"github.com/AdguardTeam/dnsproxy/proxy"
 	"github.com/AdguardTeam/dnsproxy/upstream"
+	"github.com/AdguardTeam/golibs/cache"
+	"github.com/AdguardTeam/golibs/errors"
 	"github.com/AdguardTeam/golibs/log"
 	"github.com/miekg/dns"
 )
 
 // DefaultTimeout is the default upstream timeout
 const DefaultTimeout = 10 * time.Second
+
+// defaultClientIDCacheCount is the default count of items in the LRU client ID
+// cache.  The assumption here is that there won't be more than this many
+// requests between the BeforeRequestHandler stage and the actual processing.
+const defaultClientIDCacheCount = 1024
 
 const (
 	safeBrowsingBlockHost = "standard-block.dns.adguard.com"
@@ -46,12 +50,6 @@ var webRegistered bool
 // hostToIPTable is an alias for the type of Server.tableHostToIP.
 type hostToIPTable = map[string]net.IP
 
-// ipToHostTable is an alias for the type of Server.tableIPToHost.
-//
-// TODO(a.garipov): Define an IPMap type in aghnet and use here and in other
-// places?
-type ipToHostTable = map[string]string
-
 // Server is the main way to start a DNS server.
 //
 // Example:
@@ -64,7 +62,7 @@ type ipToHostTable = map[string]string
 // The zero Server is empty and ready for use.
 type Server struct {
 	dnsProxy   *proxy.Proxy          // DNS proxy instance
-	dnsFilter  *dnsfilter.DNSFilter  // DNS filter instance
+	dnsFilter  *filtering.DNSFilter  // DNS filter instance
 	dhcpServer dhcpd.ServerInterface // DHCP server instance (optional)
 	queryLog   querylog.QueryLog     // Query log instance
 	stats      stats.Stats
@@ -77,12 +75,18 @@ type Server struct {
 	ipset          ipsetCtx
 	subnetDetector *aghnet.SubnetDetector
 	localResolvers *proxy.Proxy
+	sysResolvers   aghnet.SystemResolvers
+	recDetector    *recursionDetector
 
 	tableHostToIP     hostToIPTable
 	tableHostToIPLock sync.Mutex
 
-	tableIPToHost     ipToHostTable
+	tableIPToHost     *aghnet.IPMap
 	tableIPToHostLock sync.Mutex
+
+	// clientIDCache is a temporary storage for clientIDs that were
+	// extracted during the BeforeRequestHandler stage.
+	clientIDCache cache.Cache
 
 	// DNS proxy instance for internal usage
 	// We don't Start() it and so no listen port is required.
@@ -90,8 +94,9 @@ type Server struct {
 
 	isRunning bool
 
-	sync.RWMutex
 	conf ServerConfig
+	// serverLock protects Server.
+	serverLock sync.RWMutex
 }
 
 // defaultLocalDomainSuffix is the default suffix used to detect internal hosts
@@ -102,7 +107,7 @@ const defaultLocalDomainSuffix = ".lan."
 
 // DNSCreateParams are parameters to create a new server.
 type DNSCreateParams struct {
-	DNSFilter      *dnsfilter.DNSFilter
+	DNSFilter      *filtering.DNSFilter
 	Stats          stats.Stats
 	QueryLog       querylog.QueryLog
 	DHCPServer     dhcpd.ServerInterface
@@ -120,6 +125,14 @@ func domainNameToSuffix(tld string) (suffix string) {
 
 	return string(b)
 }
+
+const (
+	// recursionTTL is the time recursive request is cached for.
+	recursionTTL = 1 * time.Second
+	// cachedRecurrentReqNum is the maximum number of cached recurrent
+	// requests.
+	cachedRecurrentReqNum = 1000
+)
 
 // NewServer creates a new instance of the dnsforward.Server
 // Note: this function must be called only once
@@ -142,6 +155,18 @@ func NewServer(p DNSCreateParams) (s *Server, err error) {
 		queryLog:          p.QueryLog,
 		subnetDetector:    p.SubnetDetector,
 		localDomainSuffix: localDomainSuffix,
+		recDetector:       newRecursionDetector(recursionTTL, cachedRecurrentReqNum),
+		clientIDCache: cache.New(cache.Config{
+			EnableLRU: true,
+			MaxCount:  defaultClientIDCacheCount,
+		}),
+	}
+
+	// TODO(e.burkov): Enable the refresher after the actual implementation
+	// passes the public testing.
+	s.sysResolvers, err = aghnet.NewSystemResolvers(0, nil)
+	if err != nil {
+		return nil, fmt.Errorf("initializing system resolvers: %w", err)
 	}
 
 	if p.DHCPServer != nil {
@@ -160,7 +185,9 @@ func NewServer(p DNSCreateParams) (s *Server, err error) {
 
 // NewCustomServer creates a new instance of *Server with custom internal proxy.
 func NewCustomServer(internalProxy *proxy.Proxy) *Server {
-	s := &Server{}
+	s := &Server{
+		recDetector: newRecursionDetector(0, 1),
+	}
 	if internalProxy != nil {
 		s.internalProxy = internalProxy
 	}
@@ -168,25 +195,31 @@ func NewCustomServer(internalProxy *proxy.Proxy) *Server {
 	return s
 }
 
-// Close - close object
+// Close gracefully closes the server.  It is safe for concurrent use.
+//
+// TODO(e.burkov): A better approach would be making Stop method waiting for all
+// its workers finished.  But it would require the upstream.Upstream to have the
+// Close method to prevent from hanging while waiting for unresponsive server to
+// respond.
 func (s *Server) Close() {
-	s.Lock()
+	s.serverLock.Lock()
+	defer s.serverLock.Unlock()
+
 	s.dnsFilter = nil
 	s.stats = nil
 	s.queryLog = nil
 	s.dnsProxy = nil
 
-	err := s.ipset.Close()
-	if err != nil {
+	if err := s.ipset.close(); err != nil {
 		log.Error("closing ipset: %s", err)
 	}
-
-	s.Unlock()
 }
 
 // WriteDiskConfig - write configuration
 func (s *Server) WriteDiskConfig(c *FilteringConfig) {
-	s.RLock()
+	s.serverLock.RLock()
+	defer s.serverLock.RUnlock()
+
 	sc := s.conf.FilteringConfig
 	*c = sc
 	c.RatelimitWhitelist = aghstrings.CloneSlice(sc.RatelimitWhitelist)
@@ -195,15 +228,16 @@ func (s *Server) WriteDiskConfig(c *FilteringConfig) {
 	c.DisallowedClients = aghstrings.CloneSlice(sc.DisallowedClients)
 	c.BlockedHosts = aghstrings.CloneSlice(sc.BlockedHosts)
 	c.UpstreamDNS = aghstrings.CloneSlice(sc.UpstreamDNS)
-	s.RUnlock()
 }
 
 // RDNSSettings returns the copy of actual RDNS configuration.
-func (s *Server) RDNSSettings() (localPTRResolvers []string, resolveClients bool) {
-	s.RLock()
-	defer s.RUnlock()
+func (s *Server) RDNSSettings() (localPTRResolvers []string, resolveClients, resolvePTR bool) {
+	s.serverLock.RLock()
+	defer s.serverLock.RUnlock()
 
-	return aghstrings.CloneSlice(s.conf.LocalPTRResolvers), s.conf.ResolveClients
+	return aghstrings.CloneSlice(s.conf.LocalPTRResolvers),
+		s.conf.ResolveClients,
+		s.conf.UsePrivateRDNS
 }
 
 // Resolve - get IP addresses by host name from an upstream server.
@@ -211,8 +245,9 @@ func (s *Server) RDNSSettings() (localPTRResolvers []string, resolveClients bool
 // Query log and Stats are not updated.
 // This method may be called before Start().
 func (s *Server) Resolve(host string) ([]net.IPAddr, error) {
-	s.RLock()
-	defer s.RUnlock()
+	s.serverLock.RLock()
+	defer s.serverLock.RUnlock()
+
 	return s.internalProxy.LookupIPAddr(host)
 }
 
@@ -221,22 +256,25 @@ type RDNSExchanger interface {
 	// Exchange tries to resolve the ip in a suitable way, e.g. either as
 	// local or as external.
 	Exchange(ip net.IP) (host string, err error)
+	// ResolvesPrivatePTR returns true if the RDNSExchanger is able to
+	// resolve PTR requests for locally-served addresses.
+	ResolvesPrivatePTR() (ok bool)
 }
 
 const (
 	// rDNSEmptyAnswerErr is returned by Exchange method when the answer
 	// section of respond is empty.
-	rDNSEmptyAnswerErr agherr.Error = "the answer section is empty"
+	rDNSEmptyAnswerErr errors.Error = "the answer section is empty"
 
 	// rDNSNotPTRErr is returned by Exchange method when the response is not
 	// of PTR type.
-	rDNSNotPTRErr agherr.Error = "the response is not a ptr"
+	rDNSNotPTRErr errors.Error = "the response is not a ptr"
 )
 
 // Exchange implements the RDNSExchanger interface for *Server.
 func (s *Server) Exchange(ip net.IP) (host string, err error) {
-	s.RLock()
-	defer s.RUnlock()
+	s.serverLock.RLock()
+	defer s.serverLock.RUnlock()
 
 	if !s.conf.ResolveClients {
 		return "", nil
@@ -261,18 +299,21 @@ func (s *Server) Exchange(ip net.IP) (host string, err error) {
 		StartTime: time.Now(),
 	}
 
-	var resp *dns.Msg
+	resolver := s.internalProxy
 	if s.subnetDetector.IsLocallyServedNetwork(ip) {
-		err = s.localResolvers.Resolve(ctx)
-	} else {
-		err = s.internalProxy.Resolve(ctx)
+		if !s.conf.UsePrivateRDNS {
+			return "", nil
+		}
+
+		resolver = s.localResolvers
+		s.recDetector.add(*req)
 	}
-	if err != nil {
+
+	if err = resolver.Resolve(ctx); err != nil {
 		return "", err
 	}
 
-	resp = ctx.Res
-
+	resp := ctx.Res
 	if len(resp.Answer) == 0 {
 		return "", fmt.Errorf("lookup for %q: %w", arpa, rDNSEmptyAnswerErr)
 	}
@@ -285,10 +326,19 @@ func (s *Server) Exchange(ip net.IP) (host string, err error) {
 	return strings.TrimSuffix(ptr.Ptr, "."), nil
 }
 
+// ResolvesPrivatePTR implements the RDNSExchanger interface for *Server.
+func (s *Server) ResolvesPrivatePTR() (ok bool) {
+	s.serverLock.RLock()
+	defer s.serverLock.RUnlock()
+
+	return s.conf.UsePrivateRDNS
+}
+
 // Start starts the DNS server.
 func (s *Server) Start() error {
-	s.Lock()
-	defer s.Unlock()
+	s.serverLock.Lock()
+	defer s.serverLock.Unlock()
+
 	return s.startLocked()
 }
 
@@ -307,7 +357,7 @@ func (s *Server) startLocked() error {
 const defaultLocalTimeout = 1 * time.Second
 
 // collectDNSIPAddrs returns IP addresses the server is listening on without
-// port numbers as a map.  For internal use only.
+// port numbersю  For internal use only.
 func (s *Server) collectDNSIPAddrs() (addrs []string, err error) {
 	addrs = make([]string, len(s.conf.TCPListenAddrs)+len(s.conf.UDPListenAddrs))
 	var i int
@@ -340,28 +390,11 @@ func (s *Server) collectDNSIPAddrs() (addrs []string, err error) {
 	return addrs[:i], nil
 }
 
-// setupResolvers initializes the resolvers for local addresses.  For internal
-// use only.
-func (s *Server) setupResolvers(localAddrs []string) (err error) {
-	bootstraps := s.conf.BootstrapDNS
-	if len(localAddrs) == 0 {
-		var sysRes aghnet.SystemResolvers
-		// TODO(e.burkov): Enable the refresher after the actual
-		// implementation passes the public testing.
-		sysRes, err = aghnet.NewSystemResolvers(0, nil)
-		if err != nil {
-			return err
-		}
-
-		localAddrs = sysRes.Get()
-		bootstraps = nil
-	}
-	log.Debug("upstreams to resolve PTR for local addresses: %v", localAddrs)
-
+func (s *Server) filterOurDNSAddrs(addrs []string) (filtered []string, err error) {
 	var ourAddrs []string
 	ourAddrs, err = s.collectDNSIPAddrs()
 	if err != nil {
-		return err
+		return nil, err
 	}
 
 	ourAddrsSet := aghstrings.NewSet(ourAddrs...)
@@ -370,23 +403,41 @@ func (s *Server) setupResolvers(localAddrs []string) (err error) {
 	// really applicable here since in case of listening on all network
 	// interfaces we should check the whole interface's network to cut off
 	// all the loopback addresses as well.
-	localAddrs = aghstrings.FilterOut(localAddrs, func(s string) (ok bool) {
-		return ourAddrsSet.Has(s)
-	})
+	return aghstrings.FilterOut(addrs, ourAddrsSet.Has), nil
+}
 
-	var upsConfig proxy.UpstreamConfig
-	upsConfig, err = proxy.ParseUpstreamsConfig(localAddrs, upstream.Options{
-		Bootstrap: bootstraps,
-		Timeout:   defaultLocalTimeout,
-		// TODO(e.burkov): Should we verify server's ceritificates?
-	})
+// setupResolvers initializes the resolvers for local addresses.  For internal
+// use only.
+func (s *Server) setupResolvers(localAddrs []string) (err error) {
+	bootstraps := s.conf.BootstrapDNS
+	if len(localAddrs) == 0 {
+		localAddrs = s.sysResolvers.Get()
+		bootstraps = nil
+	}
+
+	localAddrs, err = s.filterOurDNSAddrs(localAddrs)
+	if err != nil {
+		return err
+	}
+
+	log.Debug("upstreams to resolve PTR for local addresses: %v", localAddrs)
+
+	var upsConfig *proxy.UpstreamConfig
+	upsConfig, err = proxy.ParseUpstreamsConfig(
+		localAddrs,
+		&upstream.Options{
+			Bootstrap: bootstraps,
+			Timeout:   defaultLocalTimeout,
+			// TODO(e.burkov): Should we verify server's ceritificates?
+		},
+	)
 	if err != nil {
 		return fmt.Errorf("parsing upstreams: %w", err)
 	}
 
 	s.localResolvers = &proxy.Proxy{
 		Config: proxy.Config{
-			UpstreamConfig: &upsConfig,
+			UpstreamConfig: upsConfig,
 		},
 	}
 
@@ -410,25 +461,14 @@ func (s *Server) Prepare(config *ServerConfig) error {
 	// --
 	s.initDefaultSettings()
 
-	// Initialize IPSET configuration
+	// Initialize ipset configuration
 	// --
-	err := s.ipset.init(s.conf.IPSETList)
+	err := s.ipset.init(s.conf.IpsetList)
 	if err != nil {
-		if !errors.Is(err, os.ErrInvalid) && !errors.Is(err, os.ErrPermission) {
-			return fmt.Errorf("cannot initialize ipset: %w", err)
-		}
-
-		// ipset cannot currently be initialized if the server was
-		// installed from Snap or when the user or the binary doesn't
-		// have the required permissions, or when the kernel doesn't
-		// support netfilter.
-		//
-		// Log and go on.
-		//
-		// TODO(a.garipov): The Snap problem can probably be solved if
-		// we add the netlink-connector interface plug.
-		log.Error("cannot initialize ipset: %s", err)
+		return err
 	}
+
+	log.Debug("inited ipset")
 
 	// Prepare DNS servers settings
 	// --
@@ -470,13 +510,16 @@ func (s *Server) Prepare(config *ServerConfig) error {
 		return fmt.Errorf("setting up resolvers: %w", err)
 	}
 
+	s.recDetector.clear()
+
 	return nil
 }
 
 // Stop stops the DNS server.
 func (s *Server) Stop() error {
-	s.Lock()
-	defer s.Unlock()
+	s.serverLock.Lock()
+	defer s.serverLock.Unlock()
+
 	return s.stopLocked()
 }
 
@@ -493,17 +536,18 @@ func (s *Server) stopLocked() error {
 	return nil
 }
 
-// IsRunning returns true if the DNS server is running
+// IsRunning returns true if the DNS server is running.
 func (s *Server) IsRunning() bool {
-	s.RLock()
-	defer s.RUnlock()
+	s.serverLock.RLock()
+	defer s.serverLock.RUnlock()
+
 	return s.isRunning
 }
 
-// Reconfigure applies the new configuration to the DNS server
+// Reconfigure applies the new configuration to the DNS server.
 func (s *Server) Reconfigure(config *ServerConfig) error {
-	s.Lock()
-	defer s.Unlock()
+	s.serverLock.Lock()
+	defer s.serverLock.Unlock()
 
 	log.Print("Start reconfiguring the server")
 	err := s.stopLocked()
@@ -528,21 +572,49 @@ func (s *Server) Reconfigure(config *ServerConfig) error {
 	return nil
 }
 
-// ServeHTTP is a HTTP handler method we use to provide DNS-over-HTTPS
+// ServeHTTP is a HTTP handler method we use to provide DNS-over-HTTPS.
 func (s *Server) ServeHTTP(w http.ResponseWriter, r *http.Request) {
-	s.RLock()
-	p := s.dnsProxy
-	s.RUnlock()
-	if p != nil { // an attempt to protect against race in case we're here after Close() was called
+	var p *proxy.Proxy
+
+	func() {
+		s.serverLock.RLock()
+		defer s.serverLock.RUnlock()
+
+		p = s.dnsProxy
+	}()
+
+	if p != nil {
 		p.ServeHTTP(w, r)
 	}
 }
 
-// IsBlockedIP - return TRUE if this client should be blocked
-func (s *Server) IsBlockedIP(ip net.IP) (bool, string) {
-	if ip == nil {
-		return false, ""
+// IsBlockedClient returns true if the client is blocked by the current access
+// settings.
+func (s *Server) IsBlockedClient(ip net.IP, clientID string) (blocked bool, rule string) {
+	s.serverLock.RLock()
+	defer s.serverLock.RUnlock()
+
+	allowlistMode := s.access.allowlistMode()
+	blockedByIP, rule := s.access.isBlockedIP(ip)
+	blockedByClientID := s.access.isBlockedClientID(clientID)
+
+	// Allow if at least one of the checks allows in allowlist mode, but
+	// block if at least one of the checks blocks in blocklist mode.
+	if allowlistMode && blockedByIP && blockedByClientID {
+		log.Debug("client %s (id %q) is not in access allowlist", ip, clientID)
+
+		// Return now without substituting the empty rule for the
+		// clientID because the rule can't be empty here.
+		return true, rule
+	} else if !allowlistMode && (blockedByIP || blockedByClientID) {
+		log.Debug("client %s (id %q) is in access blocklist", ip, clientID)
+
+		blocked = true
 	}
 
-	return s.access.IsBlockedIP(ip)
+	if rule == "" {
+		rule = clientID
+	}
+
+	return blocked, rule
 }

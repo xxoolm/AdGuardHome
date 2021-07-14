@@ -3,19 +3,46 @@ package dnsforward
 import (
 	"crypto/tls"
 	"crypto/x509"
-	"errors"
 	"fmt"
-	"io/ioutil"
 	"net"
 	"net/http"
+	"os"
 	"sort"
+	"strings"
+	"time"
 
+	"github.com/AdguardTeam/AdGuardHome/internal/aghnet"
 	"github.com/AdguardTeam/AdGuardHome/internal/aghstrings"
-	"github.com/AdguardTeam/AdGuardHome/internal/dnsfilter"
+	"github.com/AdguardTeam/AdGuardHome/internal/filtering"
 	"github.com/AdguardTeam/dnsproxy/proxy"
 	"github.com/AdguardTeam/dnsproxy/upstream"
+	"github.com/AdguardTeam/golibs/errors"
 	"github.com/AdguardTeam/golibs/log"
 	"github.com/ameshkov/dnscrypt/v2"
+)
+
+// BlockingMode is an enum of all allowed blocking modes.
+type BlockingMode string
+
+// Allowed blocking modes.
+const (
+	// BlockingModeCustomIP means respond with a custom IP address.
+	BlockingModeCustomIP BlockingMode = "custom_ip"
+
+	// BlockingModeDefault is the same as BlockingModeNullIP for
+	// Adblock-style rules, but responds with the IP address specified in
+	// the rule when blocked by an `/etc/hosts`-style rule.
+	BlockingModeDefault BlockingMode = "default"
+
+	// BlockingModeNullIP means respond with a zero IP address: "0.0.0.0"
+	// for A requests and "::" for AAAA ones.
+	BlockingModeNullIP BlockingMode = "null_ip"
+
+	// BlockingModeNXDOMAIN means respond with the NXDOMAIN code.
+	BlockingModeNXDOMAIN BlockingMode = "nxdomain"
+
+	// BlockingModeREFUSED means respond with the REFUSED code.
+	BlockingModeREFUSED BlockingMode = "refused"
 )
 
 // FilteringConfig represents the DNS filtering configuration of AdGuard Home
@@ -25,22 +52,21 @@ type FilteringConfig struct {
 	// --
 
 	// FilterHandler is an optional additional filtering callback.
-	FilterHandler func(clientAddr net.IP, clientID string, settings *dnsfilter.FilteringSettings) `yaml:"-"`
+	FilterHandler func(clientAddr net.IP, clientID string, settings *filtering.Settings) `yaml:"-"`
 
-	// GetCustomUpstreamByClient - a callback function that returns upstreams configuration
-	// based on the client IP address. Returns nil if there are no custom upstreams for the client
-	//
-	// TODO(e.burkov): Replace argument type with net.IP.
-	GetCustomUpstreamByClient func(clientAddr string) *proxy.UpstreamConfig `yaml:"-"`
+	// GetCustomUpstreamByClient is a callback that returns upstreams
+	// configuration based on the client IP address or ClientID.  It returns
+	// nil if there are no custom upstreams for the client.
+	GetCustomUpstreamByClient func(id string) (conf *proxy.UpstreamConfig, err error) `yaml:"-"`
 
 	// Protection configuration
 	// --
 
-	ProtectionEnabled  bool   `yaml:"protection_enabled"`   // whether or not use any of dnsfilter features
-	BlockingMode       string `yaml:"blocking_mode"`        // mode how to answer filtered requests
-	BlockingIPv4       net.IP `yaml:"blocking_ipv4"`        // IP address to be returned for a blocked A request
-	BlockingIPv6       net.IP `yaml:"blocking_ipv6"`        // IP address to be returned for a blocked AAAA request
-	BlockedResponseTTL uint32 `yaml:"blocked_response_ttl"` // if 0, then default is used (3600)
+	ProtectionEnabled  bool         `yaml:"protection_enabled"`   // whether or not use any of filtering features
+	BlockingMode       BlockingMode `yaml:"blocking_mode"`        // mode how to answer filtered requests
+	BlockingIPv4       net.IP       `yaml:"blocking_ipv4"`        // IP address to be returned for a blocked A request
+	BlockingIPv6       net.IP       `yaml:"blocking_ipv6"`        // IP address to be returned for a blocked AAAA request
+	BlockedResponseTTL uint32       `yaml:"blocked_response_ttl"` // if 0, then default is used (3600)
 
 	// IP (or domain name) which is used to respond to DNS requests blocked by parental control or safe-browsing
 	ParentalBlockHost     string `yaml:"parental_block_host"`
@@ -75,6 +101,8 @@ type FilteringConfig struct {
 	CacheSize   uint32 `yaml:"cache_size"`    // DNS cache size (in bytes)
 	CacheMinTTL uint32 `yaml:"cache_ttl_min"` // override TTL value (minimum) received from upstream server
 	CacheMaxTTL uint32 `yaml:"cache_ttl_max"` // override TTL value (maximum) received from upstream server
+	// CacheOptimistic defines if optimistic cache mechanism should be used.
+	CacheOptimistic bool `yaml:"cache_optimistic"`
 
 	// Other settings
 	// --
@@ -85,10 +113,12 @@ type FilteringConfig struct {
 	EnableEDNSClientSubnet bool     `yaml:"edns_client_subnet"` // Enable EDNS Client Subnet option
 	MaxGoroutines          uint32   `yaml:"max_goroutines"`     // Max. number of parallel goroutines for processing incoming requests
 
-	// IPSET configuration - add IP addresses of the specified domain names to an ipset list
-	// Syntax:
-	// "DOMAIN[,DOMAIN].../IPSET_NAME"
-	IPSETList []string `yaml:"ipset"`
+	// IpsetList is the ipset configuration that allows AdGuard Home to add
+	// IP addresses of the specified domain names to an ipset list.  Syntax:
+	//
+	//   DOMAIN[,DOMAIN].../IPSET_NAME
+	//
+	IpsetList []string `yaml:"ipset"`
 }
 
 // TLSConfig is the TLS configuration for HTTPS, DNS-over-HTTPS, and DNS-over-TLS
@@ -139,7 +169,10 @@ type ServerConfig struct {
 	FilteringConfig
 	TLSConfig
 	DNSCryptConfig
-	TLSAllowUnencryptedDOH bool
+	TLSAllowUnencryptedDoH bool
+
+	// UpstreamTimeout is the timeout for querying upstream servers.
+	UpstreamTimeout time.Duration
 
 	TLSv12Roots *x509.CertPool // list of root CAs for TLSv1.2
 	TLSCiphers  []uint16       // list of TLS ciphers to use
@@ -152,6 +185,10 @@ type ServerConfig struct {
 
 	// ResolveClients signals if the RDNS should resolve clients' addresses.
 	ResolveClients bool
+
+	// UsePrivateRDNS defines if the PTR requests for unknown addresses from
+	// locally-served networks should be resolved via private PTR resolvers.
+	UsePrivateRDNS bool
 
 	// LocalPTRResolvers is a slice of addresses to be used as upstreams for
 	// resolving PTR queries for local addresses.
@@ -175,6 +212,7 @@ func (s *Server) createProxyConfig() (proxy.Config, error) {
 		RefuseAny:              s.conf.RefuseAny,
 		CacheMinTTL:            s.conf.CacheMinTTL,
 		CacheMaxTTL:            s.conf.CacheMaxTTL,
+		CacheOptimistic:        s.conf.CacheOptimistic,
 		UpstreamConfig:         s.conf.UpstreamConfig,
 		BeforeRequestHandler:   s.beforeRequestHandler,
 		RequestHandler:         s.handleDNSRequest,
@@ -220,7 +258,7 @@ func (s *Server) createProxyConfig() (proxy.Config, error) {
 
 	// Validate proxy config
 	if proxyConfig.UpstreamConfig == nil || len(proxyConfig.UpstreamConfig.Upstreams) == 0 {
-		return proxyConfig, errors.New("no default upstream servers configured")
+		return proxyConfig, errors.Error("no default upstream servers configured")
 	}
 
 	return proxyConfig, nil
@@ -256,6 +294,10 @@ func (s *Server) initDefaultSettings() {
 	if len(s.conf.BlockedHosts) == 0 {
 		s.conf.BlockedHosts = defaultBlockedHosts
 	}
+
+	if s.conf.UpstreamTimeout == 0 {
+		s.conf.UpstreamTimeout = DefaultTimeout
+	}
 }
 
 // prepareUpstreamSettings - prepares upstream DNS server settings
@@ -275,7 +317,7 @@ func (s *Server) prepareUpstreamSettings() error {
 	// Load upstreams either from the file, or from the settings
 	var upstreams []string
 	if s.conf.UpstreamDNSFileName != "" {
-		data, err := ioutil.ReadFile(s.conf.UpstreamDNSFileName)
+		data, err := os.ReadFile(s.conf.UpstreamDNSFileName)
 		if err != nil {
 			return err
 		}
@@ -292,9 +334,9 @@ func (s *Server) prepareUpstreamSettings() error {
 	upstreams = aghstrings.FilterOut(upstreams, aghstrings.IsCommentOrEmpty)
 	upstreamConfig, err := proxy.ParseUpstreamsConfig(
 		upstreams,
-		upstream.Options{
+		&upstream.Options{
 			Bootstrap: s.conf.BootstrapDNS,
-			Timeout:   DefaultTimeout,
+			Timeout:   s.conf.UpstreamTimeout,
 		},
 	)
 	if err != nil {
@@ -303,12 +345,12 @@ func (s *Server) prepareUpstreamSettings() error {
 
 	if len(upstreamConfig.Upstreams) == 0 {
 		log.Info("warning: no default upstream servers specified, using %v", defaultDNS)
-		var uc proxy.UpstreamConfig
+		var uc *proxy.UpstreamConfig
 		uc, err = proxy.ParseUpstreamsConfig(
 			defaultDNS,
-			upstream.Options{
+			&upstream.Options{
 				Bootstrap: s.conf.BootstrapDNS,
-				Timeout:   DefaultTimeout,
+				Timeout:   s.conf.UpstreamTimeout,
 			},
 		)
 		if err != nil {
@@ -317,7 +359,8 @@ func (s *Server) prepareUpstreamSettings() error {
 		upstreamConfig.Upstreams = uc.Upstreams
 	}
 
-	s.conf.UpstreamConfig = &upstreamConfig
+	s.conf.UpstreamConfig = upstreamConfig
+
 	return nil
 }
 
@@ -380,10 +423,51 @@ func (s *Server) prepareTLS(proxyConfig *proxy.Config) error {
 	return nil
 }
 
+// isInSorted returns true if s is in the sorted slice strs.
+func isInSorted(strs []string, s string) (ok bool) {
+	i := sort.SearchStrings(strs, s)
+	if i == len(strs) || strs[i] != s {
+		return false
+	}
+
+	return true
+}
+
+// isWildcard returns true if host is a wildcard hostname.
+func isWildcard(host string) (ok bool) {
+	return len(host) >= 2 && host[0] == '*' && host[1] == '.'
+}
+
+// matchesDomainWildcard returns true if host matches the domain wildcard
+// pattern pat.
+func matchesDomainWildcard(host, pat string) (ok bool) {
+	return isWildcard(pat) && strings.HasSuffix(host, pat[1:])
+}
+
+// anyNameMatches returns true if sni, the client's SNI value, matches any of
+// the DNS names and patterns from certificate.  dnsNames must be sorted.
+func anyNameMatches(dnsNames []string, sni string) (ok bool) {
+	if aghnet.ValidateDomainName(sni) != nil {
+		return false
+	}
+
+	if isInSorted(dnsNames, sni) {
+		return true
+	}
+
+	for _, dn := range dnsNames {
+		if matchesDomainWildcard(sni, dn) {
+			return true
+		}
+	}
+
+	return false
+}
+
 // Called by 'tls' package when Client Hello is received
 // If the server name (from SNI) supplied by client is incorrect - we terminate the ongoing TLS handshake.
 func (s *Server) onGetCertificate(ch *tls.ClientHelloInfo) (*tls.Certificate, error) {
-	if s.conf.StrictSNICheck && !matchDNSName(s.conf.dnsNames, ch.ServerName) {
+	if s.conf.StrictSNICheck && !anyNameMatches(s.conf.dnsNames, ch.ServerName) {
 		log.Info("dns: tls: unknown SNI in Client Hello: %s", ch.ServerName)
 		return nil, fmt.Errorf("invalid SNI")
 	}
